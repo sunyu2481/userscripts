@@ -2,6 +2,8 @@
 
 个人油猴脚本合集。每个脚本一个目录，自包含源码、测试、构建脚本和构建产物。
 
+[访问 GitHub 仓库](https://github.com/sunyu2481/userscripts) · 所有脚本都带 `@updateURL`，发布新版后 Tampermonkey 会自动更新。
+
 ## 脚本列表
 
 ### [公益站自动签到助手](scripts/api-auto-checkin/)
@@ -13,14 +15,13 @@
 - 遇到人机验证或未登录会停下交给你，不尝试绕过
 - 标签页默认保留供核对，支持一键关闭全部
 
-**安装**：<details>
-<summary>看怎么装</summary>
+**安装**：
 
-1. 安装 Tampermonkey
-2. 打开 `scripts/api-auto-checkin/README.md` 看详细用法
-3. 把 `dist/api-auto-checkin.user.js` 拖进浏览器窗口
+```
+https://raw.githubusercontent.com/sunyu2481/userscripts/main/dist/api-auto-checkin.user.js
+```
 
-</details>
+点开这个地址，Tampermonkey 会弹出安装页面。装过一次后，脚本会用 `@updateURL` 跟踪 `main` 分支的 `dist/` 产物，以后发布新版会自动提示更新。
 
 ## 目录结构
 

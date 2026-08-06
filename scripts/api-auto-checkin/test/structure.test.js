@@ -71,6 +71,20 @@ test('元数据只申请必要权限，不含网络权限', () => {
   assert.match(header, /@noframes/);
 });
 
+test('发布脚本带更新地址，否则油猴无法自动更新', () => {
+  const header = readSrc('00-header.js');
+  // 作者和命名空间对得上仓库
+  assert.match(header, /@author\s+sunyu2481/);
+  assert.match(header, /@namespace\s+https:\/\/github\.com\/sunyu2481\/userscripts/);
+  // 更新和下载都必须指向仓库的 dist 产物
+  assert.match(header, /@updateURL\s+https:\/\/raw\.githubusercontent\.com\/sunyu2481\/userscripts\/main\/dist\/api-auto-checkin\.user\.js/);
+  assert.match(header, /@downloadURL\s+https:\/\/raw\.githubusercontent\.com\/sunyu2481\/userscripts\/main\/dist\/api-auto-checkin\.user\.js/);
+  // 版本号必须存在且是合法的 x.y.z
+  const version = header.match(/@version\s+(.+)/)?.[1]?.trim();
+  assert.ok(version, '发布脚本必须有 @version');
+  assert.match(version, /^\d+\.\d+\.\d+$/);
+});
+
 test('入口对陌生站点不做任何自动动作', () => {
   const main = readSrc('90-main.js');
   const guardIndex = main.indexOf('if (!known) return;');

@@ -5,8 +5,34 @@
 ## 装
 
 1. 安装 Tampermonkey
-2. 把 `api-auto-checkin.user.js` 拖进浏览器窗口
+2. 打开 `https://raw.githubusercontent.com/sunyu2481/userscripts/main/dist/api-auto-checkin.user.js`，Tampermonkey 会弹出安装页面
 3. 确认安装
+
+> 也可以直接下载 `dist/api-auto-checkin.user.js` 拖进浏览器窗口。
+
+## 自动更新
+
+脚本头部带了 `@updateURL` 和 `@downloadURL`，都指向本仓库 `main` 分支的 `dist/` 产物。Tampermonkey 会定期检查，**当你发布新版本时，会自动提示更新**。
+
+前提是发布时版本号要递增——油猴只认 `@version` 变大才更新。
+
+### 发布新版
+
+```bash
+# 在 scripts/api-auto-checkin/ 下
+node build.js --bump    # 递增 patch 版本并重新构建
+```
+
+然后回到仓库根提交推送：
+
+```bash
+node build.js           # 汇总到 dist/
+git add -A
+git commit -m "签到助手 v3.0.1：修复 xxx"
+git push
+```
+
+推上去后，Tampermonkey 下一次检查（默认几小时一次，或手动点「检查更新」）就会拉到新版本。
 
 ## 用
 
