@@ -49,6 +49,12 @@ node build.js <name>     # 只构建指定脚本
 node test.js <name>      # 只跑指定脚本
 ```
 
+### 发版
+
+`.github/workflows/ci.yml` 会在每次推到 `main` 时自动构建并跑测试，还会**校验 `dist/` 与源码一致**。如果你忘了先 `node build.js` 就提交，CI 会红并提示先构建。
+
+所以发版流程：改代码 → `node build.js --bump`（在脚本目录）→ 根目录 `node build.js && git add -A && git commit && git push` → CI 通过 → 油猴自动更新。
+
 ### 加一个新脚本
 
 1. 建目录 `scripts/<名称>/`
