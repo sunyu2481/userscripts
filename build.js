@@ -2,8 +2,9 @@
 // 合集构建入口。
 // 每个脚本目录自带 build.js，这里负责发现并逐个调用，最后把产物汇总到 dist/。
 //
-//   node build.js              构建全部脚本
-//   node build.js api-auto-checkin   只构建指定脚本
+//   node build.js                   构建全部脚本
+//   node build.js api-auto-checkin  只构建指定脚本
+//   node build.js --bump            构建并递增全部脚本版本号（CI 发布用）
 const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
@@ -11,6 +12,10 @@ const { execFileSync } = require('node:child_process');
 const rootDir = __dirname;
 const scriptsDir = path.join(rootDir, 'scripts');
 const distDir = path.join(rootDir, 'dist');
+
+// --bump 是合集级开关，透传给每个脚本的 build.js
+const BUMP = process.argv.includes('--bump');
+const requested = process.argv.slice(2).filter((arg) => arg !== '--bump');
 
 // 一个目录算脚本，前提是里面有 build.js
 function discoverScripts() {
@@ -26,7 +31,9 @@ function discoverScripts() {
 function buildOne(name) {
   const dir = path.join(scriptsDir, name);
   process.stdout.write(`\n[${name}]\n`);
-  execFileSync(process.execPath, ['build.js'], { cwd: dir, stdio: 'inherit' });
+  const args = ['build.js'];
+  if (BUMP) args.push('--bump');
+  execFileSync(process.execPath, args, { cwd: dir, stdio: 'inherit' });
 
   // 把产物复制到 dist/，方便统一取用
   const userScripts = fs.readdirSync(dir).filter((f) => f.endsWith('.user.js'));
@@ -41,7 +48,6 @@ function buildOne(name) {
   return userScripts;
 }
 
-const requested = process.argv.slice(2);
 const available = discoverScripts();
 
 if (available.length === 0) {

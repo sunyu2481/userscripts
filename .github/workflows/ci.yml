@@ -1,38 +1,46 @@
-name: CI
+name: Publish
 
 on:
   push:
     branches: [main]
-  pull_request:
+
+permissions:
+  contents: write
 
 jobs:
-  build-and-test:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 需要后续提交回 dist，所以要完整历史
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # 用仓库里的源码重新构建，产物写进临时目录
-      - name: Build all scripts
+      # 递增所有脚本版本号并构建
+      - name: Bump and build all scripts
         run: |
+          node build.js --bump
           node build.js
-          cp -r dist /tmp/dist-fresh
-
-      # 对比本次构建产物与提交里带进来的 dist/
-      # 若不一致，说明有人直接改了 dist 或漏跑 build，必须拦下
-      - name: Verify dist is up to date
-        run: |
-          if ! diff -r /tmp/dist-fresh dist >/dev/null; then
-            echo "❌ dist/ 与源码不一致。请先运行: node build.js 再提交。"
-            echo "差异如下："
-            diff -r /tmp/dist-fresh dist || true
-            exit 1
-          fi
-          echo "✅ dist/ 与源码一致"
 
       # 跑全部测试
       - name: Run tests
         run: node test.js
+
+      # 把版本号改动 + dist 产物提交回 main。
+      # 用 [skip ci] 避免这次提交再触发 workflow，防止死循环。
+      - name: Commit updated dist
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "没有需要提交的改动"
+          else
+            git commit -m "chore: 自动构建 dist [skip ci]"
+            git push
+            echo "已提交并推送 dist"
+          fi
