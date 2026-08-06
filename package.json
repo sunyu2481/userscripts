@@ -1,0 +1,15 @@
+{
+  "name": "userscripts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "个人油猴脚本合集",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node test.js",
+    "check": "node build.js && node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

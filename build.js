@@ -1,0 +1,65 @@
+#!/usr/bin/env node
+// 合集构建入口。
+// 每个脚本目录自带 build.js，这里负责发现并逐个调用，最后把产物汇总到 dist/。
+//
+//   node build.js              构建全部脚本
+//   node build.js api-auto-checkin   只构建指定脚本
+const fs = require('node:fs');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
+
+const rootDir = __dirname;
+const scriptsDir = path.join(rootDir, 'scripts');
+const distDir = path.join(rootDir, 'dist');
+
+// 一个目录算脚本，前提是里面有 build.js
+function discoverScripts() {
+  if (!fs.existsSync(scriptsDir)) return [];
+  return fs.readdirSync(scriptsDir)
+    .filter((name) => {
+      const dir = path.join(scriptsDir, name);
+      return fs.statSync(dir).isDirectory() && fs.existsSync(path.join(dir, 'build.js'));
+    })
+    .sort();
+}
+
+function buildOne(name) {
+  const dir = path.join(scriptsDir, name);
+  process.stdout.write(`\n[${name}]\n`);
+  execFileSync(process.execPath, ['build.js'], { cwd: dir, stdio: 'inherit' });
+
+  // 把产物复制到 dist/，方便统一取用
+  const userScripts = fs.readdirSync(dir).filter((f) => f.endsWith('.user.js'));
+  if (userScripts.length === 0) {
+    throw new Error(`${name} 没有产出 .user.js`);
+  }
+  fs.mkdirSync(distDir, { recursive: true });
+  for (const file of userScripts) {
+    fs.copyFileSync(path.join(dir, file), path.join(distDir, file));
+    process.stdout.write(`  → dist/${file}\n`);
+  }
+  return userScripts;
+}
+
+const requested = process.argv.slice(2);
+const available = discoverScripts();
+
+if (available.length === 0) {
+  console.error('scripts/ 下没有找到可构建的脚本（需要包含 build.js）');
+  process.exit(1);
+}
+
+const targets = requested.length > 0 ? requested : available;
+const unknown = targets.filter((name) => !available.includes(name));
+if (unknown.length > 0) {
+  console.error(`找不到脚本: ${unknown.join(', ')}`);
+  console.error(`可用: ${available.join(', ')}`);
+  process.exit(1);
+}
+
+let total = 0;
+for (const name of targets) {
+  total += buildOne(name).length;
+}
+
+console.log(`\n完成：${targets.length} 个脚本，${total} 个产物在 dist/`);
