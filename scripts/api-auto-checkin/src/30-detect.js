@@ -211,6 +211,13 @@ function findAlreadyCheckedIn(ignoredTexts = []) {
   return null;
 }
 
+// 配置了站点按钮文案时，页面其它区域的"已签到"可能只是记录、说明或导航。
+// 点击前不采信这些静态文字，只等待并检查指定按钮本身。
+function findInitialAlreadyCheckedIn(buttonWords = null) {
+  if (normalizeButtonWords(buttonWords).length > 0) return null;
+  return findAlreadyCheckedIn();
+}
+
 function listAlreadyCheckedInTexts() {
   const texts = [];
   for (const el of getAlreadyCheckedInNodes()) {
@@ -221,7 +228,8 @@ function listAlreadyCheckedInTexts() {
   return texts;
 }
 
-// 找被禁用的签到按钮 —— 通常也意味着今天已经签过了
+// 找不可用的签到按钮。它可能表示已签，也可能只是页面仍在初始化，
+// 因此这里只返回线索，不直接下已签到结论。
 function findDisabledCheckInButton(buttonWords = null) {
   const configuredWords = normalizeButtonWords(buttonWords);
   const extraPattern = configuredWords.length ? null : getExtraButtonPattern();

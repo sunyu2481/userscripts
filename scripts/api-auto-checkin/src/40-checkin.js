@@ -100,6 +100,7 @@ async function checkInOnThisPage(site) {
   const deadline = Date.now() + WAIT_BUTTON_TIMEOUT_MS;
   const targetHash = getTargetHash(site.visitUrl);
   let button = null;
+  let disabledButton = null;
   let sawLoginHint = false;
   let hashFixes = 0;
 
@@ -119,15 +120,14 @@ async function checkInOnThisPage(site) {
       continue;
     }
 
-    const already = findAlreadyCheckedIn();
+    const already = findInitialAlreadyCheckedIn(site.buttonWords);
     if (already) {
       return { status: 'already', message: `今日已签到（${already.text}）` };
     }
 
-    const disabled = findDisabledCheckInButton(site.buttonWords);
-    if (disabled) {
-      return { status: 'already', message: `签到按钮已置灰（${disabled.text}）` };
-    }
+    // 按钮可能只是在页面初始化期间暂时禁用，先记下来并继续等它变为可点。
+    // 单凭禁用状态无法证明已经签到，不能在这里提前返回"已签"。
+    disabledButton = findDisabledCheckInButton(site.buttonWords);
 
     // 未登录的判断放宽一点：连续两轮都这么认为才下结论，
     // 避免页面还没渲染完就误报
@@ -147,10 +147,16 @@ async function checkInOnThisPage(site) {
 
   if (!button) {
     // 最后再确认一次是否其实已经签过
-    const already = findAlreadyCheckedIn();
+    const already = findInitialAlreadyCheckedIn(site.buttonWords);
     if (already) return { status: 'already', message: `今日已签到（${already.text}）` };
     if (looksLoggedOut()) {
       return { status: 'failed', message: '需要先登录这个站点', needsLogin: true };
+    }
+    if (disabledButton) {
+      return {
+        status: 'unknown',
+        message: `签到按钮当前不可用（${disabledButton.text}），无法确认是否已签到`
+      };
     }
 
     const candidates = listClickableTexts();

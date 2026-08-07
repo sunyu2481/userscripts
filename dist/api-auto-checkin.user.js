@@ -568,6 +568,13 @@ function findAlreadyCheckedIn(ignoredTexts = []) {
   return null;
 }
 
+// 配置了站点按钮文案时，页面其它区域的"已签到"可能只是记录、说明或导航。
+// 点击前不采信这些静态文字，只等待并检查指定按钮本身。
+function findInitialAlreadyCheckedIn(buttonWords = null) {
+  if (normalizeButtonWords(buttonWords).length > 0) return null;
+  return findAlreadyCheckedIn();
+}
+
 function listAlreadyCheckedInTexts() {
   const texts = [];
   for (const el of getAlreadyCheckedInNodes()) {
@@ -578,7 +585,8 @@ function listAlreadyCheckedInTexts() {
   return texts;
 }
 
-// 找被禁用的签到按钮 —— 通常也意味着今天已经签过了
+// 找不可用的签到按钮。它可能表示已签，也可能只是页面仍在初始化，
+// 因此这里只返回线索，不直接下已签到结论。
 function findDisabledCheckInButton(buttonWords = null) {
   const configuredWords = normalizeButtonWords(buttonWords);
   const extraPattern = configuredWords.length ? null : getExtraButtonPattern();
@@ -843,6 +851,7 @@ async function checkInOnThisPage(site) {
   const deadline = Date.now() + WAIT_BUTTON_TIMEOUT_MS;
   const targetHash = getTargetHash(site.visitUrl);
   let button = null;
+  let disabledButton = null;
   let sawLoginHint = false;
   let hashFixes = 0;
 
@@ -862,15 +871,14 @@ async function checkInOnThisPage(site) {
       continue;
     }
 
-    const already = findAlreadyCheckedIn();
+    const already = findInitialAlreadyCheckedIn(site.buttonWords);
     if (already) {
       return { status: 'already', message: `今日已签到（${already.text}）` };
     }
 
-    const disabled = findDisabledCheckInButton(site.buttonWords);
-    if (disabled) {
-      return { status: 'already', message: `签到按钮已置灰（${disabled.text}）` };
-    }
+    // 按钮可能只是在页面初始化期间暂时禁用，先记下来并继续等它变为可点。
+    // 单凭禁用状态无法证明已经签到，不能在这里提前返回"已签"。
+    disabledButton = findDisabledCheckInButton(site.buttonWords);
 
     // 未登录的判断放宽一点：连续两轮都这么认为才下结论，
     // 避免页面还没渲染完就误报
@@ -890,10 +898,16 @@ async function checkInOnThisPage(site) {
 
   if (!button) {
     // 最后再确认一次是否其实已经签过
-    const already = findAlreadyCheckedIn();
+    const already = findInitialAlreadyCheckedIn(site.buttonWords);
     if (already) return { status: 'already', message: `今日已签到（${already.text}）` };
     if (looksLoggedOut()) {
       return { status: 'failed', message: '需要先登录这个站点', needsLogin: true };
+    }
+    if (disabledButton) {
+      return {
+        status: 'unknown',
+        message: `签到按钮当前不可用（${disabledButton.text}），无法确认是否已签到`
+      };
     }
 
     const candidates = listClickableTexts();

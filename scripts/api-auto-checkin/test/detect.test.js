@@ -58,6 +58,13 @@ test('已签到的按钮不再点', () => {
   }
 });
 
+test('配置站点按钮时忽略页面其它区域的已签到文案', () => {
+  const { M } = setup([{ tag: 'div', text: '今日已签到' }]);
+  assert.ok(M.findAlreadyCheckedIn(), '通用模式仍能识别已签到状态');
+  assert.equal(M.findInitialAlreadyCheckedIn(['立即签']), null,
+    '自定义按钮模式不能把静态页面文案当成已签');
+});
+
 test('隐藏的按钮不算', () => {
   const { M } = setup([
     { tag: 'button', text: '签到', hidden: true }
@@ -72,7 +79,7 @@ test('display none 的按钮不算', () => {
   assert.equal(M.findCheckInButton(), null);
 });
 
-test('禁用的按钮识别为已签到而非可点', () => {
+test('禁用的签到按钮不会被当成可点按钮', () => {
   const { M } = setup([
     { tag: 'button', text: '签到', disabled: true }
   ]);

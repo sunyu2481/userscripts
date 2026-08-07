@@ -57,10 +57,10 @@ test('转动中的禁用按钮不算今日已签', () => {
   }
 });
 
-test('转完后置灰的按钮才算已签', () => {
+test('转完后能识别置灰的按钮', () => {
   const { M } = setup([{ tag: 'button', text: '开始转动', disabled: true }]);
   const disabled = M.findDisabledCheckInButton();
-  assert.ok(disabled, '文案没有进行中特征时，置灰视为已签');
+  assert.ok(disabled, '文案没有进行中特征时，应保留不可用按钮线索');
   assert.equal(disabled.text, '开始转动');
 });
 

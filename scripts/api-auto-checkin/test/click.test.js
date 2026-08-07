@@ -123,6 +123,34 @@ test('仅访问模式正常页面直接算成功', async () => {
   assert.match(result.message, /已访问/);
 });
 
+test('自定义按钮暂时禁用且页面有静态已签到文字时不误判已签', async () => {
+  const dom = buildDom([
+    { tag: 'div', text: '今日已签到' },
+    { tag: 'button', text: '立即签', disabled: true }
+  ], { url: 'https://a.com/checkin' });
+
+  let source = ['20-site.js', '30-detect.js', '31-guards.js', '41-verdict.js', '40-checkin.js']
+    .map(n => fs.readFileSync(path.join(srcDir, n), 'utf8')).join('\n');
+  source = source
+    .replace('const WAIT_BUTTON_TIMEOUT_MS = 20000;', 'const WAIT_BUTTON_TIMEOUT_MS = 5;')
+    .replace('const POLL_MS = 400;', 'const POLL_MS = 1;')
+    .replace('await sleep(1200);', 'await sleep(0);');
+
+  const M = new Function('document', 'window', 'location', 'URL', 'setTimeout', 'console', 'getSettings', `
+    ${source}
+    return { checkInOnThisPage };
+  `)(dom.document, dom.window, dom.location, URL, setTimeout, console, () => ({ extraButtonWords: '' }));
+
+  const result = await M.checkInOnThisPage({
+    visitOnly: false,
+    visitUrl: 'https://a.com/checkin',
+    buttonWords: ['立即签'],
+    resultWords: []
+  });
+  assert.equal(result.status, 'unknown');
+  assert.match(result.message, /无法确认是否已签到/);
+});
+
 test('元素不支持 scrollIntoView 也能点', () => {
   const { M, button } = setup();
   button.scrollIntoView = () => { throw new Error('不支持'); };

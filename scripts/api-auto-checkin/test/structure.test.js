@@ -139,6 +139,25 @@ test('点击后没有明确结果时不把置灰当成功', () => {
   assert.match(body, /status: 'unknown'/);
 });
 
+test('自定义按钮模式不使用全局已签到文案作为点击前结论', () => {
+  const detect = readSrc('30-detect.js');
+  const checkin = readSrc('40-checkin.js');
+  assert.match(detect, /function findInitialAlreadyCheckedIn/);
+  assert.match(detect, /if \(normalizeButtonWords\(buttonWords\)\.length > 0\) return null/);
+  assert.equal((checkin.match(/findInitialAlreadyCheckedIn\(site\.buttonWords\)/g) || []).length, 2);
+});
+
+test('点击前禁用按钮不单独判为已签', () => {
+  const checkin = readSrc('40-checkin.js');
+  const beforeClick = checkin.slice(
+    checkin.indexOf('async function checkInOnThisPage'),
+    checkin.indexOf('// 点击前清空已捕获的响应')
+  );
+  assert.match(beforeClick, /disabledButton = findDisabledCheckInButton\(site\.buttonWords\)/);
+  assert.match(beforeClick, /status: 'unknown'/);
+  assert.doesNotMatch(beforeClick, /签到按钮已置灰/);
+});
+
 test('结果弹窗不被当公告关掉', () => {
   const guards = readSrc('31-guards.js');
   const verdict = readSrc('41-verdict.js');
