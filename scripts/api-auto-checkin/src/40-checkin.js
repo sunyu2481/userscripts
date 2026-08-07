@@ -4,9 +4,6 @@
 
 const WAIT_BUTTON_TIMEOUT_MS = 20000;   // 等按钮出现最多 20 秒（SPA 渲染慢）
 const WAIT_RESULT_TIMEOUT_MS = 20000;   // 点完等结果最多 20 秒（转盘动画要几秒）
-// 点击后的缓冲期：这段时间内不把"按钮置灰"当成成功，
-// 因为转盘/抽奖正在动画中，按钮本来就是禁用的
-const POST_CLICK_SETTLE_MS = 6000;
 const POLL_MS = 400;
 
 function sleep(ms) {
@@ -61,10 +58,10 @@ async function ensureHashRoute(site) {
 }
 
 // 页面自己发出的签到请求会被 hook 记下来，用于判断点击后的结果
-function takeCapturedResult() {
+function takeCapturedResult(site) {
   while (capturedResponses.length > 0) {
     const captured = capturedResponses.shift();
-    const verdict = readVerdictFromResponse(captured);
+    const verdict = readVerdictFromResponse(captured, site);
     if (verdict) return verdict;
   }
   return null;
@@ -88,7 +85,7 @@ async function checkInOnThisPage(site) {
     return { status: 'failed', message: '站点要求人机验证，请手动完成', needsHuman: true };
   }
 
-  closeBlockingDialogs();
+  closeBlockingDialogs(site.buttonWords, site.resultWords);
 
   // 仅访问模式：打开页面就算完成。
   // 但落在登录页说明这次访问没真正生效，得让你知道。
@@ -111,7 +108,7 @@ async function checkInOnThisPage(site) {
       return { status: 'failed', message: '站点要求人机验证，请手动完成', needsHuman: true };
     }
 
-    button = findCheckInButton();
+    button = findCheckInButton(site.buttonWords);
     if (button) break;
 
     // SPA 可能在初始化过程中把 hash 冲掉（例如登录检查后跳回首页），
@@ -127,7 +124,7 @@ async function checkInOnThisPage(site) {
       return { status: 'already', message: `今日已签到（${already.text}）` };
     }
 
-    const disabled = findDisabledCheckInButton();
+    const disabled = findDisabledCheckInButton(site.buttonWords);
     if (disabled) {
       return { status: 'already', message: `签到按钮已置灰（${disabled.text}）` };
     }
@@ -144,7 +141,7 @@ async function checkInOnThisPage(site) {
     }
 
     // 弹窗可能是延迟出现的，每轮都试着关一下
-    closeBlockingDialogs();
+    closeBlockingDialogs(site.buttonWords, site.resultWords);
     await sleep(POLL_MS);
   }
 
@@ -171,12 +168,17 @@ async function checkInOnThisPage(site) {
   capturedResponses.length = 0;
 
   const clickedText = button.text;
+  const initialAlreadyTexts = listAlreadyCheckedInTexts();
+  const initialToastTexts = listVisibleToastTexts();
   const clicked = clickElement(button.el);
   if (!clicked) {
     return { status: 'failed', message: `点击「${clickedText}」失败` };
   }
 
-  return waitForCheckInOutcome(clickedText);
+  return waitForCheckInOutcome(clickedText, site, {
+    initialAlreadyTexts,
+    initialToastTexts
+  });
 }
 
 // 真实点击：先滚动到可见位置，再派发完整的鼠标事件序列。
@@ -221,40 +223,28 @@ function dispatchQuietly(el, ctorName, type, init) {
 }
 
 // 点完之后看页面怎么反应
-async function waitForCheckInOutcome(clickedText) {
+async function waitForCheckInOutcome(clickedText, site = null, baseline = {}) {
   const deadline = Date.now() + WAIT_RESULT_TIMEOUT_MS;
-  // 转盘、抽奖这类点完要转几秒才出结果。这段时间里按钮是禁用的，
-  // 不能把"按钮置灰"当成签到成功——那只是动作还在进行。
-  const settleUntil = Date.now() + POST_CLICK_SETTLE_MS;
 
   while (Date.now() < deadline) {
     await sleep(POLL_MS);
 
     // 页面自己发的请求最可信
-    const fromResponse = takeCapturedResult();
+    const fromResponse = takeCapturedResult(site);
     if (fromResponse) {
       return { ...fromResponse, clickedText };
     }
 
     // 其次看页面上冒出来的提示文字（toast、结果弹窗、状态标签）
-    const fromToast = readVerdictFromToast();
+    const fromToast = readVerdictFromToast(site, baseline.initialToastTexts || []);
     if (fromToast) {
       return { ...fromToast, clickedText };
     }
 
     // 明确变成"已签到"文案，随时可信
-    const already = findAlreadyCheckedIn();
+    const already = findAlreadyCheckedIn(baseline.initialAlreadyTexts || []);
     if (already) {
       return { status: 'success', message: `签到成功（${already.text}）`, clickedText };
-    }
-
-    // "按钮置灰"这条证据弱：动画期间也是灰的。
-    // 等过了缓冲期、且按钮不是进行中状态，才采信。
-    if (Date.now() >= settleUntil) {
-      const disabled = findDisabledCheckInButton();
-      if (disabled) {
-        return { status: 'success', message: '签到成功，按钮已置灰', clickedText };
-      }
     }
 
     if (hasHumanVerification()) {

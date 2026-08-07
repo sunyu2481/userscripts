@@ -131,16 +131,12 @@ test('点击派发完整鼠标事件序列且逐个隔离', () => {
   assert.match(checkin, /typeof Ctor !== 'function'/);
 });
 
-test('点击后有缓冲期，动画期间不把置灰当成功', () => {
+test('点击后没有明确结果时不把置灰当成功', () => {
   const checkin = readSrc('40-checkin.js');
-  assert.match(checkin, /POST_CLICK_SETTLE_MS/);
   const body = checkin.slice(checkin.indexOf('async function waitForCheckInOutcome'));
-  // 置灰判定必须被缓冲期包住
-  assert.match(body, /if \(Date\.now\(\) >= settleUntil\) \{/);
-  const settleIndex = body.indexOf('Date.now() >= settleUntil');
-  const disabledIndex = body.indexOf('findDisabledCheckInButton()');
-  assert.ok(settleIndex !== -1 && settleIndex < disabledIndex,
-    '转盘动画期间按钮就是灰的，不能当成签到成功');
+  assert.doesNotMatch(body, /findDisabledCheckInButton\(/,
+    '点击后的置灰状态不能单独作为成功证据');
+  assert.match(body, /status: 'unknown'/);
 });
 
 test('结果弹窗不被当公告关掉', () => {
@@ -203,7 +199,7 @@ test('hash 路由页面会被纠正到目标路由', () => {
   assert.match(checkin, /async function ensureHashRoute/);
   // 纠正必须在找按钮之前发生
   const ensureIndex = checkin.indexOf('await ensureHashRoute(site)');
-  const findIndex = checkin.indexOf('findCheckInButton()');
+  const findIndex = checkin.indexOf('findCheckInButton(site.buttonWords)');
   assert.ok(ensureIndex !== -1 && ensureIndex < findIndex, 'hash 纠正要在找按钮之前');
   // 轮询中途被冲掉也要纠正，但有次数上限
   assert.match(checkin, /hashFixes < 2/);
@@ -367,6 +363,17 @@ test('名称、地址、仅访问模式都能编辑', () => {
   assert.match(body, /key: 'url'/);
   assert.match(body, /key: 'visitOnly'/);
   assert.match(body, /type: 'checkbox'/);
+  assert.match(body, /key: 'buttonWords'/);
+  assert.match(body, /key: 'resultWords'/);
+});
+
+test('站点级按钮和结果文案会进入备份', () => {
+  const site = readSrc('20-site.js');
+  const events = readSrc('72-ui-events.js');
+  assert.match(site, /buttonWords: normalizeConfiguredWords/);
+  assert.match(site, /resultWords: normalizeConfiguredWords/);
+  assert.ok(events.includes('buttonWords: normalizeConfiguredWords(site.buttonWords)'));
+  assert.ok(events.includes('resultWords: normalizeConfiguredWords(site.resultWords)'));
 });
 
 test('仅访问模式漏传时保持原值', () => {

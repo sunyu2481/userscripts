@@ -166,6 +166,16 @@ test('补充文案支持中英文逗号和换行分隔', () => {
   assert.ok(setup(spec, { extraWords: '每日礼包\n点我领福利' }).M.findCheckInButton());
 });
 
+test('站点指定按钮文案时只匹配指定按钮', () => {
+  const dom = setup([
+    { tag: 'button', text: '立即签' },
+    { tag: 'button', text: '每日签到' }
+  ]);
+  assert.equal(dom.M.findCheckInButton().text, '每日签到');
+  assert.equal(dom.M.findCheckInButton(['立即签']).text, '立即签');
+  assert.equal(dom.M.findCheckInButton(['不存在']), null);
+});
+
 test('过长的文案不当按钮', () => {
   const { M } = setup([
     { tag: 'button', text: '签到功能说明：每天登录后可以点击签到按钮领取额度奖励' }
@@ -291,6 +301,20 @@ test('弹窗里有签到按钮时不关它', () => {
     }
   ]);
   assert.equal(M.closeBlockingDialogs(), 0);
+});
+
+test('站点自定义结果文案的弹窗不关', () => {
+  const { M } = setup([
+    {
+      tag: 'div',
+      attrs: { class: 'modal', role: 'dialog' },
+      children: [
+        { tag: 'p', text: '本次奖励已发放' },
+        { tag: 'button', text: '关闭' }
+      ]
+    }
+  ]);
+  assert.equal(M.closeBlockingDialogs(null, ['奖励已发放']), 0);
 });
 
 test('人机验证弹窗一律不动', () => {

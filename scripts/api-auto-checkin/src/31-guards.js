@@ -89,7 +89,7 @@ function looksLikeInvalidPage() {
 const DIALOG_CLOSE_PATTERN = /^(×|✕|✖|x|X|关闭|取消|我知道了|知道了|好的|好|确定|明白|不再提示|下次再说|以后再说|OK|Ok|ok|Close|Dismiss|Got it|Later|Skip)$/i;
 
 // 公告弹窗常常盖住签到按钮，先关掉。人机验证和登录相关的一律不动。
-function closeBlockingDialogs() {
+function closeBlockingDialogs(buttonWords = null, resultWords = null) {
   if (hasHumanVerification()) return 0;
 
   let closed = 0;
@@ -106,9 +106,11 @@ function closeBlockingDialogs() {
     if (LOGIN_TEXT_PATTERN.test(dialogText)) continue;
     // 弹窗里本身有签到按钮时不能关，否则把要点的东西关掉了
     if (CHECKIN_PATTERN.test(dialogText)) continue;
+    const configuredWords = normalizeButtonWords(buttonWords);
+    if (configuredWords.some(word => dialogText.replace(/\s+/g, ' ').includes(word))) continue;
     // 签到结果弹窗也不能关：转盘/抽奖的结果就在这种弹窗里，
     // 关掉就读不到"恭喜获得 xx"这类结论了
-    if (isCheckInOutcomeText(dialogText)) continue;
+    if (isCheckInOutcomeText(dialogText) || matchesConfiguredResultText(dialogText, { resultWords })) continue;
 
     for (const control of dialog.querySelectorAll(CLICKABLE_SELECTOR + ', [class*="close" i]')) {
       if (!isVisible(control)) continue;

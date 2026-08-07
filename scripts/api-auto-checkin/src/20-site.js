@@ -1,6 +1,6 @@
 // ===== 站点模型 =====
 // 脚本不认识"站点类型"，也不知道任何接口地址。
-// 一个站点只需要两件事：去哪个页面，以及怎么称呼它。
+// 一个站点至少需要两件事：去哪个页面，以及怎么称呼它；其余是可选规则。
 function dedupeSitesByDomain(sites) {
   if (!Array.isArray(sites)) return [];
   const seen = new Set();
@@ -14,6 +14,18 @@ function dedupeSitesByDomain(sites) {
   return deduped;
 }
 
+// 配置文案只保存普通文本，不把用户输入当作正则表达式。
+function normalizeConfiguredWords(value, maxLength = 40) {
+  const raw = Array.isArray(value) ? value : String(value || '').split(/[,，\n]/);
+  const words = [];
+  for (const item of raw) {
+    const word = String(item || '').replace(/\s+/g, ' ').trim();
+    if (!word || word.length > maxLength || words.includes(word)) continue;
+    words.push(word);
+  }
+  return words;
+}
+
 function buildSiteConfig(site) {
   const domain = site.domain;
   return {
@@ -25,6 +37,10 @@ function buildSiteConfig(site) {
     visitUrl: site.pageUrl || `https://${domain}/`,
     // 仅访问模式：打开页面就算完成，不找按钮
     visitOnly: site.visitOnly === true,
+    // 配置后只按这些文案找按钮，避免把跳转入口当成签到动作
+    buttonWords: normalizeConfiguredWords(site.buttonWords),
+    // 某些站点的结果文案不在通用词表里时，用它补充结果判断
+    resultWords: normalizeConfiguredWords(site.resultWords),
     // 名称被手动改过，自动获取不再覆盖
     nameLocked: site.nameLocked === true
   };
@@ -60,7 +76,9 @@ function moveSiteInList(sites, fromIndex, toIndex) {
 
 // 校验并生成编辑后的站点列表。不直接改存储，方便单独测。
 // 返回 { sites } 或 { error }
-function buildEditedSite(rawSites, originalDomain, { name, url, visitOnly }) {
+function buildEditedSite(rawSites, originalDomain, {
+  name, url, visitOnly, buttonWords, resultWords
+}) {
   const sites = Array.isArray(rawSites) ? rawSites : [];
   const target = String(originalDomain || '').trim().toLowerCase();
   const existing = sites.find(site => String(site.domain || '').toLowerCase() === target);
@@ -85,6 +103,12 @@ function buildEditedSite(rawSites, originalDomain, { name, url, visitOnly }) {
   const finalVisitOnly = visitOnly === undefined
     ? existing.visitOnly === true
     : visitOnly === true;
+  const finalButtonWords = buttonWords === undefined
+    ? normalizeConfiguredWords(existing.buttonWords)
+    : normalizeConfiguredWords(buttonWords);
+  const finalResultWords = resultWords === undefined
+    ? normalizeConfiguredWords(existing.resultWords)
+    : normalizeConfiguredWords(resultWords);
 
   return {
     sites: sites.map(site => String(site.domain || '').toLowerCase() === target
@@ -94,7 +118,9 @@ function buildEditedSite(rawSites, originalDomain, { name, url, visitOnly }) {
         name: finalName,
         nameLocked,
         pageUrl: parsed.pageUrl || '',
-        visitOnly: finalVisitOnly
+        visitOnly: finalVisitOnly,
+        buttonWords: finalButtonWords,
+        resultWords: finalResultWords
       }
       : site
     )

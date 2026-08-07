@@ -151,7 +151,7 @@ function patchRawSite(domain, patch) {
 // ==================================================================
 // ===== 站点模型 =====
 // 脚本不认识"站点类型"，也不知道任何接口地址。
-// 一个站点只需要两件事：去哪个页面，以及怎么称呼它。
+// 一个站点至少需要两件事：去哪个页面，以及怎么称呼它；其余是可选规则。
 function dedupeSitesByDomain(sites) {
   if (!Array.isArray(sites)) return [];
   const seen = new Set();
@@ -165,6 +165,18 @@ function dedupeSitesByDomain(sites) {
   return deduped;
 }
 
+// 配置文案只保存普通文本，不把用户输入当作正则表达式。
+function normalizeConfiguredWords(value, maxLength = 40) {
+  const raw = Array.isArray(value) ? value : String(value || '').split(/[,，\n]/);
+  const words = [];
+  for (const item of raw) {
+    const word = String(item || '').replace(/\s+/g, ' ').trim();
+    if (!word || word.length > maxLength || words.includes(word)) continue;
+    words.push(word);
+  }
+  return words;
+}
+
 function buildSiteConfig(site) {
   const domain = site.domain;
   return {
@@ -176,6 +188,10 @@ function buildSiteConfig(site) {
     visitUrl: site.pageUrl || `https://${domain}/`,
     // 仅访问模式：打开页面就算完成，不找按钮
     visitOnly: site.visitOnly === true,
+    // 配置后只按这些文案找按钮，避免把跳转入口当成签到动作
+    buttonWords: normalizeConfiguredWords(site.buttonWords),
+    // 某些站点的结果文案不在通用词表里时，用它补充结果判断
+    resultWords: normalizeConfiguredWords(site.resultWords),
     // 名称被手动改过，自动获取不再覆盖
     nameLocked: site.nameLocked === true
   };
@@ -211,7 +227,9 @@ function moveSiteInList(sites, fromIndex, toIndex) {
 
 // 校验并生成编辑后的站点列表。不直接改存储，方便单独测。
 // 返回 { sites } 或 { error }
-function buildEditedSite(rawSites, originalDomain, { name, url, visitOnly }) {
+function buildEditedSite(rawSites, originalDomain, {
+  name, url, visitOnly, buttonWords, resultWords
+}) {
   const sites = Array.isArray(rawSites) ? rawSites : [];
   const target = String(originalDomain || '').trim().toLowerCase();
   const existing = sites.find(site => String(site.domain || '').toLowerCase() === target);
@@ -236,6 +254,12 @@ function buildEditedSite(rawSites, originalDomain, { name, url, visitOnly }) {
   const finalVisitOnly = visitOnly === undefined
     ? existing.visitOnly === true
     : visitOnly === true;
+  const finalButtonWords = buttonWords === undefined
+    ? normalizeConfiguredWords(existing.buttonWords)
+    : normalizeConfiguredWords(buttonWords);
+  const finalResultWords = resultWords === undefined
+    ? normalizeConfiguredWords(existing.resultWords)
+    : normalizeConfiguredWords(resultWords);
 
   return {
     sites: sites.map(site => String(site.domain || '').toLowerCase() === target
@@ -245,7 +269,9 @@ function buildEditedSite(rawSites, originalDomain, { name, url, visitOnly }) {
         name: finalName,
         nameLocked,
         pageUrl: parsed.pageUrl || '',
-        visitOnly: finalVisitOnly
+        visitOnly: finalVisitOnly,
+        buttonWords: finalButtonWords,
+        resultWords: finalResultWords
       }
       : site
     )
@@ -413,11 +439,18 @@ function getExtraButtonPattern() {
   }
 }
 
-function looksLikeCheckInText(text, extraPattern = null) {
+function normalizeButtonWords(value) {
+  const raw = Array.isArray(value) ? value : String(value || '').split(/[,，\n]/);
+  return [...new Set(raw.map(word => String(word || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean))];
+}
+
+function looksLikeCheckInText(text, extraPattern = null, buttonWords = null) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized || normalized.length > 24) return false;   // 按钮文案不会很长
   if (NOT_CHECKIN_PATTERN.test(normalized)) return false;
   if (ALREADY_PATTERN.test(normalized)) return false;
+  if (buttonWords?.length) return buttonWords.includes(normalized);
   if (extraPattern?.test(normalized)) return true;
   return CHECKIN_PATTERN.test(normalized);
 }
@@ -480,15 +513,16 @@ function isDisabled(el) {
 }
 
 // 找签到按钮：遍历所有可点击元素，按文案匹配再按优先级排序
-function findCheckInButton() {
-  const extraPattern = getExtraButtonPattern();
+function findCheckInButton(buttonWords = null) {
+  const configuredWords = normalizeButtonWords(buttonWords);
+  const extraPattern = configuredWords.length ? null : getExtraButtonPattern();
   const found = [];
 
   let index = 0;
   for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {
     index++;
     const text = getOwnText(el);
-    if (!looksLikeCheckInText(text, extraPattern)) continue;
+    if (!looksLikeCheckInText(text, extraPattern, configuredWords)) continue;
     if (!isVisible(el)) continue;
     if (isDisabled(el)) continue;
     found.push({ el, text, index });
@@ -498,7 +532,7 @@ function findCheckInButton() {
   if (found.length === 0) {
     for (const el of document.querySelectorAll('div, span, p, li, h1, h2, h3, h4, label')) {
       const text = getOwnText(el);
-      if (!looksLikeCheckInText(text, extraPattern)) continue;
+      if (!looksLikeCheckInText(text, extraPattern, configuredWords)) continue;
       if (!isVisible(el)) continue;
       const clickable = el.closest(CLICKABLE_SELECTOR);
       const target = clickable && isVisible(clickable) ? clickable : el;
@@ -514,27 +548,43 @@ function findCheckInButton() {
 }
 
 // 找"今日已签到"的状态提示
-function findAlreadyCheckedIn() {
-  const nodes = document.querySelectorAll(
+function getAlreadyCheckedInNodes() {
+  return document.querySelectorAll(
     'button, a, [role="button"], [role="status"], [aria-live], span, p, div, li, ' +
     'input[type="button"], input[type="submit"], [class*="badge" i], [class*="tag" i], ' +
     '[class*="status" i], [class*="chip" i]'
   );
+}
+
+function findAlreadyCheckedIn(ignoredTexts = []) {
+  const nodes = getAlreadyCheckedInNodes();
   for (const el of nodes) {
     const text = getOwnText(el);
     if (!looksLikeAlreadyText(text)) continue;
     if (!isVisible(el)) continue;
+    if (ignoredTexts.includes(text)) continue;
     return { el, text };
   }
   return null;
 }
 
+function listAlreadyCheckedInTexts() {
+  const texts = [];
+  for (const el of getAlreadyCheckedInNodes()) {
+    const text = getOwnText(el);
+    if (!looksLikeAlreadyText(text) || !isVisible(el) || texts.includes(text)) continue;
+    texts.push(text);
+  }
+  return texts;
+}
+
 // 找被禁用的签到按钮 —— 通常也意味着今天已经签过了
-function findDisabledCheckInButton() {
-  const extraPattern = getExtraButtonPattern();
+function findDisabledCheckInButton(buttonWords = null) {
+  const configuredWords = normalizeButtonWords(buttonWords);
+  const extraPattern = configuredWords.length ? null : getExtraButtonPattern();
   for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {
     const text = getOwnText(el);
-    if (!looksLikeCheckInText(text, extraPattern)) continue;
+    if (!looksLikeCheckInText(text, extraPattern, configuredWords)) continue;
     if (!isVisible(el)) continue;
     if (!isDisabled(el)) continue;
     // 进行中的状态不算已签：按钮此刻禁用只是因为动作还没完成。
@@ -652,7 +702,7 @@ function looksLikeInvalidPage() {
 const DIALOG_CLOSE_PATTERN = /^(×|✕|✖|x|X|关闭|取消|我知道了|知道了|好的|好|确定|明白|不再提示|下次再说|以后再说|OK|Ok|ok|Close|Dismiss|Got it|Later|Skip)$/i;
 
 // 公告弹窗常常盖住签到按钮，先关掉。人机验证和登录相关的一律不动。
-function closeBlockingDialogs() {
+function closeBlockingDialogs(buttonWords = null, resultWords = null) {
   if (hasHumanVerification()) return 0;
 
   let closed = 0;
@@ -669,9 +719,11 @@ function closeBlockingDialogs() {
     if (LOGIN_TEXT_PATTERN.test(dialogText)) continue;
     // 弹窗里本身有签到按钮时不能关，否则把要点的东西关掉了
     if (CHECKIN_PATTERN.test(dialogText)) continue;
+    const configuredWords = normalizeButtonWords(buttonWords);
+    if (configuredWords.some(word => dialogText.replace(/\s+/g, ' ').includes(word))) continue;
     // 签到结果弹窗也不能关：转盘/抽奖的结果就在这种弹窗里，
     // 关掉就读不到"恭喜获得 xx"这类结论了
-    if (isCheckInOutcomeText(dialogText)) continue;
+    if (isCheckInOutcomeText(dialogText) || matchesConfiguredResultText(dialogText, { resultWords })) continue;
 
     for (const control of dialog.querySelectorAll(CLICKABLE_SELECTOR + ', [class*="close" i]')) {
       if (!isVisible(control)) continue;
@@ -695,9 +747,6 @@ function closeBlockingDialogs() {
 
 const WAIT_BUTTON_TIMEOUT_MS = 20000;   // 等按钮出现最多 20 秒（SPA 渲染慢）
 const WAIT_RESULT_TIMEOUT_MS = 20000;   // 点完等结果最多 20 秒（转盘动画要几秒）
-// 点击后的缓冲期：这段时间内不把"按钮置灰"当成成功，
-// 因为转盘/抽奖正在动画中，按钮本来就是禁用的
-const POST_CLICK_SETTLE_MS = 6000;
 const POLL_MS = 400;
 
 function sleep(ms) {
@@ -752,10 +801,10 @@ async function ensureHashRoute(site) {
 }
 
 // 页面自己发出的签到请求会被 hook 记下来，用于判断点击后的结果
-function takeCapturedResult() {
+function takeCapturedResult(site) {
   while (capturedResponses.length > 0) {
     const captured = capturedResponses.shift();
-    const verdict = readVerdictFromResponse(captured);
+    const verdict = readVerdictFromResponse(captured, site);
     if (verdict) return verdict;
   }
   return null;
@@ -779,7 +828,7 @@ async function checkInOnThisPage(site) {
     return { status: 'failed', message: '站点要求人机验证，请手动完成', needsHuman: true };
   }
 
-  closeBlockingDialogs();
+  closeBlockingDialogs(site.buttonWords, site.resultWords);
 
   // 仅访问模式：打开页面就算完成。
   // 但落在登录页说明这次访问没真正生效，得让你知道。
@@ -802,7 +851,7 @@ async function checkInOnThisPage(site) {
       return { status: 'failed', message: '站点要求人机验证，请手动完成', needsHuman: true };
     }
 
-    button = findCheckInButton();
+    button = findCheckInButton(site.buttonWords);
     if (button) break;
 
     // SPA 可能在初始化过程中把 hash 冲掉（例如登录检查后跳回首页），
@@ -818,7 +867,7 @@ async function checkInOnThisPage(site) {
       return { status: 'already', message: `今日已签到（${already.text}）` };
     }
 
-    const disabled = findDisabledCheckInButton();
+    const disabled = findDisabledCheckInButton(site.buttonWords);
     if (disabled) {
       return { status: 'already', message: `签到按钮已置灰（${disabled.text}）` };
     }
@@ -835,7 +884,7 @@ async function checkInOnThisPage(site) {
     }
 
     // 弹窗可能是延迟出现的，每轮都试着关一下
-    closeBlockingDialogs();
+    closeBlockingDialogs(site.buttonWords, site.resultWords);
     await sleep(POLL_MS);
   }
 
@@ -862,12 +911,17 @@ async function checkInOnThisPage(site) {
   capturedResponses.length = 0;
 
   const clickedText = button.text;
+  const initialAlreadyTexts = listAlreadyCheckedInTexts();
+  const initialToastTexts = listVisibleToastTexts();
   const clicked = clickElement(button.el);
   if (!clicked) {
     return { status: 'failed', message: `点击「${clickedText}」失败` };
   }
 
-  return waitForCheckInOutcome(clickedText);
+  return waitForCheckInOutcome(clickedText, site, {
+    initialAlreadyTexts,
+    initialToastTexts
+  });
 }
 
 // 真实点击：先滚动到可见位置，再派发完整的鼠标事件序列。
@@ -912,40 +966,28 @@ function dispatchQuietly(el, ctorName, type, init) {
 }
 
 // 点完之后看页面怎么反应
-async function waitForCheckInOutcome(clickedText) {
+async function waitForCheckInOutcome(clickedText, site = null, baseline = {}) {
   const deadline = Date.now() + WAIT_RESULT_TIMEOUT_MS;
-  // 转盘、抽奖这类点完要转几秒才出结果。这段时间里按钮是禁用的，
-  // 不能把"按钮置灰"当成签到成功——那只是动作还在进行。
-  const settleUntil = Date.now() + POST_CLICK_SETTLE_MS;
 
   while (Date.now() < deadline) {
     await sleep(POLL_MS);
 
     // 页面自己发的请求最可信
-    const fromResponse = takeCapturedResult();
+    const fromResponse = takeCapturedResult(site);
     if (fromResponse) {
       return { ...fromResponse, clickedText };
     }
 
     // 其次看页面上冒出来的提示文字（toast、结果弹窗、状态标签）
-    const fromToast = readVerdictFromToast();
+    const fromToast = readVerdictFromToast(site, baseline.initialToastTexts || []);
     if (fromToast) {
       return { ...fromToast, clickedText };
     }
 
     // 明确变成"已签到"文案，随时可信
-    const already = findAlreadyCheckedIn();
+    const already = findAlreadyCheckedIn(baseline.initialAlreadyTexts || []);
     if (already) {
       return { status: 'success', message: `签到成功（${already.text}）`, clickedText };
-    }
-
-    // "按钮置灰"这条证据弱：动画期间也是灰的。
-    // 等过了缓冲期、且按钮不是进行中状态，才采信。
-    if (Date.now() >= settleUntil) {
-      const disabled = findDisabledCheckInButton();
-      if (disabled) {
-        return { status: 'success', message: '签到成功，按钮已置灰', clickedText };
-      }
     }
 
     if (hasHumanVerification()) {
@@ -986,12 +1028,14 @@ function installNetworkHooks() {
       if (!url || !text) return;
       // 只留可能与签到有关的请求，避免堆积无关响应
       const path = new URL(String(url), location.origin).pathname.toLowerCase();
-      const isCheckInish = /check.?in|checkin|sign|attend|daily|claim|reward|bonus|punch/.test(path);
+      const isCheckInish = isCheckInPath(path);
       const isPost = String(method || 'GET').toUpperCase() === 'POST';
       if (!isCheckInish && !isPost) return;
       if (text.length > 20000) return;
 
-      capturedResponses.push({ url: String(url), method, status, text, path });
+      capturedResponses.push({
+        url: String(url), method, status, text, path, isCheckInish
+      });
       // 只保留最近若干条，避免长时间停留的页面无限增长
       if (capturedResponses.length > 12) capturedResponses.shift();
     } catch (e) { /* 记录失败不影响页面 */ }
@@ -1032,10 +1076,16 @@ function installNetworkHooks() {
 }
 
 // ===== 提示文案 =====
-const SUCCESS_TEXT_PATTERN = /签到成功|打卡成功|领取成功|获得|恭喜|成功签到|签到完成|奖励已?到账|\+\s*\d|抽中|转到|中奖|幸运|奖品|已存入|已到账|到账|check.?in success|checked in success|success(?:fully)? claim|claimed success|reward granted|you (?:won|got)|congratulation/i;
+const SUCCESS_TEXT_PATTERN = /签到成功|打卡成功|领取成功|成功签到|签到完成|奖励已?到账|check.?in success|checked in success|success(?:fully)? claim|claimed success|reward granted|(?:恭喜|幸运).{0,20}(?:获得|抽中|中奖|奖励|到账)|(?:抽中|中奖|已存入|已到账|转到).{0,24}(?:额度|积分|奖励|余额|账户|account|credit|quota|point|token|[$¥￥]\s*\d|\d+(?:\.\d+)?\s*(?:额度|积分|元))|中奖(?:啦|了|!|！)|\+\s*\d+(?:\.\d+)?\s*(?:额度|积分|credits?|points?|tokens?|quota|元|[$¥￥])/i;
 const ALREADY_TEXT_PATTERN = /已签到|已经签到|已签过|今日已签|今天已签|重复签到|已打卡|已领取|今日已领取|明日再来|明天再来|次数不足|次数已用|机会已用|今日次数|already check|already sign|already claim|claimed today|come back tomorrow|no (?:more )?(?:draws?|spins?) left/i;
 const FAIL_TEXT_PATTERN = /签到失败|领取失败|打卡失败|操作失败|请稍后再试|系统繁忙|失败|错误|异常|余额不足|check.?in fail|failed|error occurred/i;
 const LOGIN_TEXT_HINT = /请先?登录|需要登录|登录后|未登录|会话已过期|登录已过期|请重新登录|unauthorized|please log ?in|session expired|token.{0,10}(?:invalid|expired)/i;
+
+function isCheckInPath(path) {
+  return /(?:^|[/_-])(?:check[\s_-]*in|signin|sign(?:[/_-]in)?|attendance?|daily|claim|reward|bonus|punch)(?:[/_-]|$)/.test(
+    String(path || '').toLowerCase()
+  );
+}
 
 // 这段文字看着像不像签到结果。用于保护结果弹窗不被当成公告关掉——
 // 转盘/抽奖的结论就写在那种弹窗里。
@@ -1047,8 +1097,20 @@ function isCheckInOutcomeText(text) {
     ALREADY_TEXT_PATTERN.test(normalized);
 }
 
+function matchesConfiguredResultText(text, site) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  const words = normalizeConfiguredWords(site?.resultWords);
+  return words.some(word => normalized.includes(word));
+}
+
+function isCheckInResponse(captured) {
+  if (captured?.isCheckInish === true) return true;
+  const path = String(captured?.path || captured?.url || '').toLowerCase();
+  return isCheckInPath(path);
+}
+
 // 从响应体里读结论
-function readVerdictFromResponse(captured) {
+function readVerdictFromResponse(captured, site = null) {
   if (!captured) return null;
 
   const data = parseJsonSafely(captured.text);
@@ -1065,8 +1127,11 @@ function readVerdictFromResponse(captured) {
     }
   }
 
+  const isCheckInish = isCheckInResponse(captured);
+  const hasConfiguredResult = matchesConfiguredResultText(message, site);
+
   // 先看文案里的"已签到"，它比 success 字段更能说明情况
-  if (message && ALREADY_TEXT_PATTERN.test(message)) {
+  if (message && ALREADY_TEXT_PATTERN.test(message) && isCheckInish) {
     return { status: 'already', message };
   }
 
@@ -1076,7 +1141,8 @@ function readVerdictFromResponse(captured) {
     data?.ret === 1 ||
     data?.ok === true;
 
-  if (succeeded) {
+  // 通用 success/code 字段只有签到相关接口才可信，避免把保存设置、心跳等 POST 当成功
+  if (succeeded && isCheckInish) {
     return { status: 'success', message: message || '签到成功' };
   }
 
@@ -1085,17 +1151,17 @@ function readVerdictFromResponse(captured) {
     (typeof data?.code === 'number' && data.code !== 0) ||
     captured.status >= 400;
 
-  if (failed && message) {
+  if (failed && message && isCheckInish) {
     if (LOGIN_TEXT_HINT.test(message)) {
       return { status: 'failed', message, needsLogin: true };
     }
     return { status: 'failed', message };
   }
 
-  if (message && SUCCESS_TEXT_PATTERN.test(message)) {
+  if (message && (hasConfiguredResult || SUCCESS_TEXT_PATTERN.test(message))) {
     return { status: 'success', message };
   }
-  if (message && FAIL_TEXT_PATTERN.test(message)) {
+  if (message && FAIL_TEXT_PATTERN.test(message) && isCheckInish) {
     return { status: 'failed', message };
   }
 
@@ -1125,14 +1191,27 @@ const TOAST_SELECTOR = [
   '[role="alert"]', '[role="status"]', '[aria-live="polite"]', '[aria-live="assertive"]'
 ].join(', ');
 
-function readVerdictFromToast() {
+function listVisibleToastTexts() {
+  const texts = [];
+  for (const el of document.querySelectorAll(TOAST_SELECTOR)) {
+    if (!isVisible(el)) continue;
+    const text = String(el.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text && text.length <= 120 && !texts.includes(text)) texts.push(text);
+  }
+  return texts;
+}
+
+function readVerdictFromToast(site = null, ignoredTexts = []) {
   for (const el of document.querySelectorAll(TOAST_SELECTOR)) {
     if (!isVisible(el)) continue;
     const text = String(el.innerText || '').replace(/\s+/g, ' ').trim();
     if (!text || text.length > 120) continue;
+    if (ignoredTexts.includes(text)) continue;
 
     if (ALREADY_TEXT_PATTERN.test(text)) return { status: 'already', message: text };
-    if (SUCCESS_TEXT_PATTERN.test(text)) return { status: 'success', message: text };
+    if (matchesConfiguredResultText(text, site) || SUCCESS_TEXT_PATTERN.test(text)) {
+      return { status: 'success', message: text };
+    }
     if (LOGIN_TEXT_HINT.test(text)) return { status: 'failed', message: text, needsLogin: true };
     if (FAIL_TEXT_PATTERN.test(text)) return { status: 'failed', message: text };
   }
@@ -2061,6 +2140,20 @@ function handleEditSite(siteId) {
       hint: '脚本会打开这个地址并在页面上找签到按钮'
     },
     {
+      key: 'buttonWords',
+      label: '签到按钮文案（可选）',
+      value: site.buttonWords.join(', '),
+      placeholder: '如 立即签',
+      hint: '填了以后只精确匹配这里的文案；多个文案用逗号分隔'
+    },
+    {
+      key: 'resultWords',
+      label: '成功结果文案（可选）',
+      value: site.resultWords.join(', '),
+      placeholder: '如 奖励已发放',
+      hint: '结果提示不在通用词表时再填，不会主动发请求'
+    },
+    {
       key: 'visitOnly',
       label: '仅访问（不用点签到按钮）',
       type: 'checkbox',
@@ -2068,8 +2161,10 @@ function handleEditSite(siteId) {
       hint: '打开页面就算完成。适合每天访问一次即可的站点。'
     }
   ], {
-    onConfirm: ({ name, url, visitOnly }) => {
-      const edited = buildEditedSite(getRawSites(), site.domain, { name, url, visitOnly });
+    onConfirm: ({ name, url, buttonWords, resultWords, visitOnly }) => {
+      const edited = buildEditedSite(getRawSites(), site.domain, {
+        name, url, buttonWords, resultWords, visitOnly
+      });
       if (edited.error) {
         showToast(edited.error);
         return false;
@@ -2115,7 +2210,9 @@ function buildBackupPayload() {
       nameLocked: site.nameLocked === true,
       enabled: site.enabled !== false,
       pageUrl: site.pageUrl || '',
-      visitOnly: site.visitOnly === true
+      visitOnly: site.visitOnly === true,
+      buttonWords: normalizeConfiguredWords(site.buttonWords),
+      resultWords: normalizeConfiguredWords(site.resultWords)
     })),
     settings: getSettings()
   };
@@ -2146,7 +2243,9 @@ function parseBackupPayload(text) {
       enabled: site.enabled !== false,
       pageUrl: String(site.pageUrl || ''),
       // 兼容旧版扩展导出的 mode 字段
-      visitOnly: site.visitOnly === true || site.mode === 'visit'
+      visitOnly: site.visitOnly === true || site.mode === 'visit',
+      buttonWords: normalizeConfiguredWords(site.buttonWords),
+      resultWords: normalizeConfiguredWords(site.resultWords)
     });
   }
 

@@ -152,6 +152,18 @@ test('同时改名称和地址', () => {
   assert.equal(edited.nameLocked, true, '手动改过要锁定');
 });
 
+test('编辑站点时保存按钮和结果文案', () => {
+  const result = M.buildEditedSite(baseSites, 'a.com', {
+    name: '甲站',
+    url: 'https://a.com/#/daily',
+    buttonWords: '立即签，立即签',
+    resultWords: '奖励已发放'
+  });
+  const edited = result.sites.find(s => s.domain === 'a.com');
+  assert.deepEqual(edited.buttonWords, ['立即签']);
+  assert.deepEqual(edited.resultWords, ['奖励已发放']);
+});
+
 test('改域名时连带更新', () => {
   const result = M.buildEditedSite(baseSites, 'a.com', {
     name: '甲站',

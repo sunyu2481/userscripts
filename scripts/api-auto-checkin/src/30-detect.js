@@ -82,11 +82,18 @@ function getExtraButtonPattern() {
   }
 }
 
-function looksLikeCheckInText(text, extraPattern = null) {
+function normalizeButtonWords(value) {
+  const raw = Array.isArray(value) ? value : String(value || '').split(/[,，\n]/);
+  return [...new Set(raw.map(word => String(word || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean))];
+}
+
+function looksLikeCheckInText(text, extraPattern = null, buttonWords = null) {
   const normalized = String(text || '').replace(/\s+/g, ' ').trim();
   if (!normalized || normalized.length > 24) return false;   // 按钮文案不会很长
   if (NOT_CHECKIN_PATTERN.test(normalized)) return false;
   if (ALREADY_PATTERN.test(normalized)) return false;
+  if (buttonWords?.length) return buttonWords.includes(normalized);
   if (extraPattern?.test(normalized)) return true;
   return CHECKIN_PATTERN.test(normalized);
 }
@@ -149,15 +156,16 @@ function isDisabled(el) {
 }
 
 // 找签到按钮：遍历所有可点击元素，按文案匹配再按优先级排序
-function findCheckInButton() {
-  const extraPattern = getExtraButtonPattern();
+function findCheckInButton(buttonWords = null) {
+  const configuredWords = normalizeButtonWords(buttonWords);
+  const extraPattern = configuredWords.length ? null : getExtraButtonPattern();
   const found = [];
 
   let index = 0;
   for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {
     index++;
     const text = getOwnText(el);
-    if (!looksLikeCheckInText(text, extraPattern)) continue;
+    if (!looksLikeCheckInText(text, extraPattern, configuredWords)) continue;
     if (!isVisible(el)) continue;
     if (isDisabled(el)) continue;
     found.push({ el, text, index });
@@ -167,7 +175,7 @@ function findCheckInButton() {
   if (found.length === 0) {
     for (const el of document.querySelectorAll('div, span, p, li, h1, h2, h3, h4, label')) {
       const text = getOwnText(el);
-      if (!looksLikeCheckInText(text, extraPattern)) continue;
+      if (!looksLikeCheckInText(text, extraPattern, configuredWords)) continue;
       if (!isVisible(el)) continue;
       const clickable = el.closest(CLICKABLE_SELECTOR);
       const target = clickable && isVisible(clickable) ? clickable : el;
@@ -183,27 +191,43 @@ function findCheckInButton() {
 }
 
 // 找"今日已签到"的状态提示
-function findAlreadyCheckedIn() {
-  const nodes = document.querySelectorAll(
+function getAlreadyCheckedInNodes() {
+  return document.querySelectorAll(
     'button, a, [role="button"], [role="status"], [aria-live], span, p, div, li, ' +
     'input[type="button"], input[type="submit"], [class*="badge" i], [class*="tag" i], ' +
     '[class*="status" i], [class*="chip" i]'
   );
+}
+
+function findAlreadyCheckedIn(ignoredTexts = []) {
+  const nodes = getAlreadyCheckedInNodes();
   for (const el of nodes) {
     const text = getOwnText(el);
     if (!looksLikeAlreadyText(text)) continue;
     if (!isVisible(el)) continue;
+    if (ignoredTexts.includes(text)) continue;
     return { el, text };
   }
   return null;
 }
 
+function listAlreadyCheckedInTexts() {
+  const texts = [];
+  for (const el of getAlreadyCheckedInNodes()) {
+    const text = getOwnText(el);
+    if (!looksLikeAlreadyText(text) || !isVisible(el) || texts.includes(text)) continue;
+    texts.push(text);
+  }
+  return texts;
+}
+
 // 找被禁用的签到按钮 —— 通常也意味着今天已经签过了
-function findDisabledCheckInButton() {
-  const extraPattern = getExtraButtonPattern();
+function findDisabledCheckInButton(buttonWords = null) {
+  const configuredWords = normalizeButtonWords(buttonWords);
+  const extraPattern = configuredWords.length ? null : getExtraButtonPattern();
   for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {
     const text = getOwnText(el);
-    if (!looksLikeCheckInText(text, extraPattern)) continue;
+    if (!looksLikeCheckInText(text, extraPattern, configuredWords)) continue;
     if (!isVisible(el)) continue;
     if (!isDisabled(el)) continue;
     // 进行中的状态不算已签：按钮此刻禁用只是因为动作还没完成。

@@ -29,6 +29,52 @@ test('成功字段的多种写法都认', () => {
   }
 });
 
+test('普通 POST 的通用成功字段不作为签到结果', () => {
+  const verdict = M.readVerdictFromResponse({
+    url: 'https://site.example.com/api/profile/save',
+    method: 'POST',
+    status: 200,
+    text: JSON.stringify({ success: true })
+  });
+  assert.equal(verdict, null);
+});
+
+test('settings 路径不因包含 sign 而被当成签到接口', () => {
+  const verdict = M.readVerdictFromResponse({
+    url: 'https://site.example.com/api/settings',
+    method: 'POST',
+    status: 200,
+    text: JSON.stringify({ success: true })
+  });
+  assert.equal(verdict, null);
+});
+
+test('非签到路径的明确签到文案仍可识别', () => {
+  const verdict = M.readVerdictFromResponse({
+    url: 'https://site.example.com/api/action',
+    method: 'POST',
+    status: 200,
+    text: JSON.stringify({ message: '签到成功' })
+  });
+  assert.equal(verdict?.status, 'success');
+});
+
+test('站点结果文案可以识别非通用提示', () => {
+  const verdict = M.readVerdictFromResponse({
+    url: 'https://site.example.com/api/action',
+    method: 'POST',
+    status: 200,
+    text: JSON.stringify({ message: '本次奖励已发放' })
+  }, { resultWords: ['奖励已发放'] });
+  assert.equal(verdict?.status, 'success');
+});
+
+test('单独的获得或恭喜不作为成功文案', () => {
+  assert.equal(M.readVerdictFromResponse(respond({ message: '获得新头像' })), null);
+  assert.equal(M.readVerdictFromResponse(respond({ message: '恭喜注册成功' })), null);
+  assert.equal(M.readVerdictFromResponse(respond({ message: '+1 follower' })), null);
+});
+
 test('已签到的提示优先于 success 字段', () => {
   // 有站点返回 success:true 但消息是"今日已签到"
   const verdict = M.readVerdictFromResponse(respond({ success: true, message: '今日已签到' }));

@@ -186,6 +186,20 @@ function handleEditSite(siteId) {
       hint: '脚本会打开这个地址并在页面上找签到按钮'
     },
     {
+      key: 'buttonWords',
+      label: '签到按钮文案（可选）',
+      value: site.buttonWords.join(', '),
+      placeholder: '如 立即签',
+      hint: '填了以后只精确匹配这里的文案；多个文案用逗号分隔'
+    },
+    {
+      key: 'resultWords',
+      label: '成功结果文案（可选）',
+      value: site.resultWords.join(', '),
+      placeholder: '如 奖励已发放',
+      hint: '结果提示不在通用词表时再填，不会主动发请求'
+    },
+    {
       key: 'visitOnly',
       label: '仅访问（不用点签到按钮）',
       type: 'checkbox',
@@ -193,8 +207,10 @@ function handleEditSite(siteId) {
       hint: '打开页面就算完成。适合每天访问一次即可的站点。'
     }
   ], {
-    onConfirm: ({ name, url, visitOnly }) => {
-      const edited = buildEditedSite(getRawSites(), site.domain, { name, url, visitOnly });
+    onConfirm: ({ name, url, buttonWords, resultWords, visitOnly }) => {
+      const edited = buildEditedSite(getRawSites(), site.domain, {
+        name, url, buttonWords, resultWords, visitOnly
+      });
       if (edited.error) {
         showToast(edited.error);
         return false;
@@ -240,7 +256,9 @@ function buildBackupPayload() {
       nameLocked: site.nameLocked === true,
       enabled: site.enabled !== false,
       pageUrl: site.pageUrl || '',
-      visitOnly: site.visitOnly === true
+      visitOnly: site.visitOnly === true,
+      buttonWords: normalizeConfiguredWords(site.buttonWords),
+      resultWords: normalizeConfiguredWords(site.resultWords)
     })),
     settings: getSettings()
   };
@@ -271,7 +289,9 @@ function parseBackupPayload(text) {
       enabled: site.enabled !== false,
       pageUrl: String(site.pageUrl || ''),
       // 兼容旧版扩展导出的 mode 字段
-      visitOnly: site.visitOnly === true || site.mode === 'visit'
+      visitOnly: site.visitOnly === true || site.mode === 'visit',
+      buttonWords: normalizeConfiguredWords(site.buttonWords),
+      resultWords: normalizeConfiguredWords(site.resultWords)
     });
   }
 

@@ -51,9 +51,9 @@ node test.js <name>      # 只跑指定脚本
 
 ### 发版
 
-`.github/workflows/ci.yml` 会在每次推到 `main` 时自动构建并跑测试，还会**校验 `dist/` 与源码一致**。如果你忘了先 `node build.js` 就提交，CI 会红并提示先构建。
+`.github/workflows/ci.yml` 会在每次推到 `main` 时自动递增版本号、构建全部脚本并跑测试；测试通过后，Actions 会把更新后的版本号、脚本产物和 `dist/` 自动提交回 `main`（提交带 `[skip ci]`，不会循环触发）。只在其它分支 push 不会发版。
 
-所以发版流程：改代码 → `node build.js --bump`（在脚本目录）→ 根目录 `node build.js && git add -A && git commit && git push` → CI 通过 → 油猴自动更新。
+所以发版流程只有：改源码和测试 → 提交 → `git push origin main` → CI 自动完成构建和发布 → 油猴自动更新。不需要本地先运行 `node build.js` 或 `node build.js --bump`；本地构建命令仅用于开发时预览和检查产物。
 
 ### 加一个新脚本
 

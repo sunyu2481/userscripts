@@ -35,6 +35,16 @@ test('仅访问模式标记保留', () => {
   assert.equal(M.buildSiteConfig({ domain: 'a.com' }).visitOnly, false);
 });
 
+test('站点配置保留并规整按钮和结果文案', () => {
+  const site = M.buildSiteConfig({
+    domain: 'a.com',
+    buttonWords: ' 立即签，立即签\n每日签到 ',
+    resultWords: ['奖励已发放', ' 奖励已发放 ']
+  });
+  assert.deepEqual(site.buttonWords, ['立即签', '每日签到']);
+  assert.deepEqual(site.resultWords, ['奖励已发放']);
+});
+
 test('地址解析补协议并保留路径与查询', () => {
   assert.deepEqual(M.normalizeSiteInput('c.com/console/personal'), {
     domain: 'c.com',
