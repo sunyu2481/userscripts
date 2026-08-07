@@ -9,7 +9,8 @@ function isFocusRequestForMe(request, host, now = Date.now()) {
   if (!request?.domain) return false;
   if (request.domain !== host) return false;
   // 过期请求不响应，避免刷新页面时被历史请求带到前台
-  return now - Number(request.at || 0) <= FOCUS_REQUEST_TTL_MS;
+  return now >= Number(request.at || 0) &&
+    now - Number(request.at || 0) <= FOCUS_REQUEST_TTL_MS;
 }
 
 function focusSelf() {

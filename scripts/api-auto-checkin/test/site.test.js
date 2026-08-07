@@ -65,7 +65,16 @@ test('无效输入返回 null', () => {
   assert.equal(M.normalizeSiteInput(''), null);
   assert.equal(M.normalizeSiteInput('   '), null);
   assert.equal(M.normalizeSiteInput('没有点的字符串'), null);
+  assert.equal(M.normalizeSiteInput('http://c.com/checkin'), null);
+  assert.equal(M.normalizeSiteInput('https://user:pass@c.com/checkin'), null);
+  assert.equal(M.normalizeSiteInput('https://bad_name.c.com/checkin'), null);
+  assert.equal(M.normalizeSiteInput('https://-bad.c.com/checkin'), null);
   assert.equal(M.normalizeSiteInput(null), null);
+});
+
+test('配置文案有数量上限', () => {
+  const words = Array.from({ length: 50 }, (_, index) => `文案${index}`);
+  assert.equal(M.normalizeConfiguredWords(words).length, M.MAX_CONFIGURED_WORDS);
 });
 
 test('域名去重保留首个并转小写', () => {

@@ -69,6 +69,12 @@ test('过期请求不响应', () => {
   assert.equal(M.isFocusRequestForMe(stale, 'a.com', now + M.FOCUS_REQUEST_TTL_MS + 1), false);
 });
 
+test('来自未来的聚焦请求不响应', () => {
+  const { M } = setup();
+  const now = 1_000_000;
+  assert.equal(M.isFocusRequestForMe({ domain: 'a.com', at: now + 1 }, 'a.com', now), false);
+});
+
 test('空请求或缺字段不响应', () => {
   const { M } = setup();
   assert.equal(M.isFocusRequestForMe(null, 'a.com'), false);

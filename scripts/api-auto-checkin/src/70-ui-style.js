@@ -6,7 +6,7 @@ const STYLE_ID = 'gm-checkin-style';
 const PANEL_CSS = `
 #${PANEL_ID} {
   position: fixed; right: 16px; bottom: 16px; z-index: 2147483000;
-  width: 320px; max-height: 70vh; overflow: hidden;
+  width: min(320px, calc(100vw - 32px)); max-height: 70vh; overflow: hidden;
   display: flex; flex-direction: column;
   background: #fff; color: #1f2328;
   border: 1px solid #d0d7de; border-radius: 10px;

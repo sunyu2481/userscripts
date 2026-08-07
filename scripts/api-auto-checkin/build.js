@@ -14,10 +14,13 @@ const bumpVersion = process.argv.includes('--bump');
 
 // 构造时递增 patch 版本：3.0.0 → 3.0.1
 function bumpPatch(version) {
-  const parts = String(version || '').split('.');
-  while (parts.length < 3) parts.push('0');
-  parts[2] = String(Number(parts[2] || 0) + 1);
-  return parts.join('.');
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(version || ''));
+  if (!match) throw new Error(`版本号不是标准三段式: ${version}`);
+  const patch = Number(match[3]);
+  if (!Number.isSafeInteger(patch) || patch >= Number.MAX_SAFE_INTEGER) {
+    throw new Error(`patch 版本号过大: ${version}`);
+  }
+  return `${match[1]}.${match[2]}.${patch + 1}`;
 }
 
 if (bumpVersion) {
@@ -27,7 +30,13 @@ if (bumpVersion) {
     console.error('00-header.js 里没找到 @version');
     process.exit(1);
   }
-  const next = bumpPatch(match[1]);
+  let next;
+  try {
+    next = bumpPatch(match[1]);
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
   fs.writeFileSync(headerFile, header.replace(/^\/\/ @version\s+\S+/m, `// @version      ${next}`));
   console.log(`版本号 ${match[1]} → ${next}`);
 }

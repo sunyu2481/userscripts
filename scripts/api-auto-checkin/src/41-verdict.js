@@ -9,19 +9,30 @@ function installNetworkHooks() {
   const originalFetch = window.fetch;
   const originalOpen = window.XMLHttpRequest?.prototype?.open;
   const originalSend = window.XMLHttpRequest?.prototype?.send;
+  const xhrRequests = new WeakMap();
+
+  function getRequestInfo(url, method) {
+    try {
+      if (!url) return null;
+      const path = new URL(String(url), location.origin).pathname.toLowerCase();
+      const normalizedMethod = String(method || 'GET').toUpperCase();
+      if (!isCheckInPath(path) && normalizedMethod !== 'POST') return null;
+      return { url: String(url), method: normalizedMethod, path };
+    } catch (e) {
+      return null;
+    }
+  }
 
   function record(url, method, status, text) {
     try {
       if (!url || !text) return;
       // 只留可能与签到有关的请求，避免堆积无关响应
-      const path = new URL(String(url), location.origin).pathname.toLowerCase();
-      const isCheckInish = isCheckInPath(path);
-      const isPost = String(method || 'GET').toUpperCase() === 'POST';
-      if (!isCheckInish && !isPost) return;
+      const info = getRequestInfo(url, method);
+      if (!info) return;
       if (text.length > 20000) return;
 
       capturedResponses.push({
-        url: String(url), method, status, text, path, isCheckInish
+        ...info, status, text, isCheckInish: isCheckInPath(info.path)
       });
       // 只保留最近若干条，避免长时间停留的页面无限增长
       if (capturedResponses.length > 12) capturedResponses.shift();
@@ -36,9 +47,11 @@ function installNetworkHooks() {
         const options = args[1] || {};
         const url = typeof request === 'string' ? request : request?.url;
         const method = String(options.method || request?.method || 'GET');
-        if (url) {
-          const text = await response.clone().text();
-          record(url, method, response.status, text);
+        if (getRequestInfo(url, method)) {
+          // 读取副本不能阻塞页面拿到原响应；失败也不影响页面请求。
+          Promise.resolve(response.clone().text())
+            .then(text => record(url, method, response.status, text))
+            .catch(() => {});
         }
       } catch (e) { /* 克隆失败忽略 */ }
       return response;
@@ -47,15 +60,25 @@ function installNetworkHooks() {
 
   if (originalOpen && originalSend) {
     window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      this.__ci = { method, url: String(url || '') };
+      xhrRequests.set(this, { method, url: String(url || '') });
       return originalOpen.call(this, method, url, ...rest);
     };
     window.XMLHttpRequest.prototype.send = function (...args) {
       try {
-        this.addEventListener('load', () => {
-          const info = this.__ci || {};
-          record(info.url, info.method, this.status, this.responseText || '');
-        }, { once: true });
+        const info = xhrRequests.get(this);
+        if (getRequestInfo(info?.url, info?.method)) {
+          this.addEventListener('load', () => {
+            try {
+              let text = '';
+              if (this.responseType === 'json') {
+                text = JSON.stringify(this.response ?? null);
+              } else if (!this.responseType || this.responseType === 'text') {
+                text = this.responseText || '';
+              }
+              record(info.url, info.method, this.status, text);
+            } catch (e) { /* 非文本响应或读取失败时跳过 */ }
+          }, { once: true });
+        }
       } catch (e) { /* 忽略 */ }
       return originalSend.apply(this, args);
     };

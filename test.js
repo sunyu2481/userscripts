@@ -12,7 +12,10 @@ const scriptsDir = path.join(__dirname, 'scripts');
 function discoverScripts() {
   if (!fs.existsSync(scriptsDir)) return [];
   return fs.readdirSync(scriptsDir)
-    .filter((name) => fs.statSync(path.join(scriptsDir, name)).isDirectory())
+    .filter((name) => {
+      const dir = path.join(scriptsDir, name);
+      return fs.statSync(dir).isDirectory() && fs.existsSync(path.join(dir, 'build.js'));
+    })
     .sort();
 }
 
@@ -40,11 +43,16 @@ if (files.length === 0) {
   process.exit(0);
 }
 
-// 构建产物参与结构测试，先确保它们是最新的
-spawnSync(process.execPath, ['build.js', ...targets], {
+// 构建产物参与结构测试，先确保它们是最新的。构建失败时不能继续拿旧产物测试。
+const buildResult = spawnSync(process.execPath, ['build.js', ...targets], {
   cwd: __dirname,
-  stdio: 'ignore'
+  stdio: 'inherit'
 });
+if (buildResult.error) {
+  console.error(`构建启动失败: ${buildResult.error.message}`);
+  process.exit(1);
+}
+if (buildResult.status !== 0) process.exit(buildResult.status ?? 1);
 
 const result = spawnSync(process.execPath, ['--test', ...files], {
   cwd: __dirname,

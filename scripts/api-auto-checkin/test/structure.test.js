@@ -17,6 +17,13 @@ function readBuilt() {
   return fs.readFileSync(file, 'utf8');
 }
 
+test('根级测试入口会传播预构建失败', () => {
+  const rootTest = fs.readFileSync(path.join(rootDir, '..', '..', 'test.js'), 'utf8');
+  assert.match(rootTest, /const buildResult = spawnSync/);
+  assert.match(rootTest, /if \(buildResult\.error\)/);
+  assert.match(rootTest, /if \(buildResult\.status !== 0\) process\.exit/);
+});
+
 // ===== 这条是整个脚本的立足点 =====
 test('脚本不主动发起任何签到请求', () => {
   for (const name of allSrcNames) {

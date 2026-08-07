@@ -1,12 +1,23 @@
 // ===== 自定义对话框 =====
 // 沿用扩展版约定：不使用原生 confirm / prompt
 const DIALOG_ID = 'gm-checkin-dialog';
+let activeDialog = null;
 
-function removeDialog() {
-  document.getElementById(DIALOG_ID)?.remove();
+function removeDialog(notifyDismiss = true) {
+  const dialog = activeDialog;
+  activeDialog = null;
+
+  if (!dialog) {
+    document.getElementById(DIALOG_ID)?.remove();
+    return;
+  }
+
+  dialog.overlay.remove();
+  document.removeEventListener('keydown', dialog.onEsc);
+  if (notifyDismiss) dialog.onDismiss?.();
 }
 
-function createDialogShell(title) {
+function createDialogShell(title, options = {}) {
   removeDialog();
   injectStyle();
 
@@ -21,7 +32,8 @@ function createDialogShell(title) {
   const box = document.createElement('div');
   box.style.cssText = `
     width: min(460px, 92vw); background: #fff; color: #1f2328;
-    border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.24);
+    max-height: 92vh; display: flex; flex-direction: column;
+    border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.24);
     font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
     overflow: hidden;
   `;
@@ -32,7 +44,7 @@ function createDialogShell(title) {
 
   box.innerHTML = `
     <div style="padding:12px 14px;background:#667eea;color:#fff;font-weight:600">${escapeHtml(title)}</div>
-    <div data-role="content" style="padding:14px"></div>
+    <div data-role="content" style="padding:14px;overflow-y:auto"></div>
     <div data-role="footer" style="padding:0 14px 14px;display:flex;gap:8px;justify-content:flex-end"></div>
   `;
 
@@ -42,12 +54,13 @@ function createDialogShell(title) {
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay) removeDialog();
   });
-  document.addEventListener('keydown', function onEsc(event) {
+  function onEsc(event) {
     if (event.key === 'Escape') {
       removeDialog();
-      document.removeEventListener('keydown', onEsc);
     }
-  });
+  }
+  document.addEventListener('keydown', onEsc);
+  activeDialog = { overlay, onEsc, onDismiss: options.onDismiss };
 
   return {
     overlay,
@@ -72,14 +85,28 @@ function makeDialogButton(label, variant = 'default') {
 
 function showConfirm(message) {
   return new Promise((resolve) => {
-    const { content, footer } = createDialogShell('请确认');
+    let settled = false;
+    const { content, footer } = createDialogShell('请确认', {
+      onDismiss: () => {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      }
+    });
     content.textContent = message;
+
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      removeDialog(false);
+      resolve(value);
+    }
 
     const cancel = makeDialogButton('取消');
     const ok = makeDialogButton('确定', 'danger');
 
-    cancel.addEventListener('click', () => { removeDialog(); resolve(false); });
-    ok.addEventListener('click', () => { removeDialog(); resolve(true); });
+    cancel.addEventListener('click', () => finish(false));
+    ok.addEventListener('click', () => finish(true));
 
     footer.append(cancel, ok);
     ok.focus();

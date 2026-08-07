@@ -15,13 +15,16 @@ function dedupeSitesByDomain(sites) {
 }
 
 // 配置文案只保存普通文本，不把用户输入当作正则表达式。
-function normalizeConfiguredWords(value, maxLength = 40) {
+const MAX_CONFIGURED_WORDS = 30;
+
+function normalizeConfiguredWords(value, maxLength = 40, maxItems = MAX_CONFIGURED_WORDS) {
   const raw = Array.isArray(value) ? value : String(value || '').split(/[,，\n]/);
   const words = [];
   for (const item of raw) {
     const word = String(item || '').replace(/\s+/g, ' ').trim();
     if (!word || word.length > maxLength || words.includes(word)) continue;
     words.push(word);
+    if (words.length >= maxItems) break;
   }
   return words;
 }
@@ -46,14 +49,25 @@ function buildSiteConfig(site) {
   };
 }
 
-// 解析用户输入的地址，域名和完整路径都留着
+function isValidSiteHostname(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!host || host.length > 253 || !host.includes('.') || host.endsWith('.')) return false;
+  return host.split('.').every(label =>
+    label.length > 0 && label.length <= 63 &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+  );
+}
+
+// 解析用户输入的地址，域名和完整路径都留着。脚本只匹配 HTTPS 页面，
+// 因此显式 HTTP、带账号密码或非法主机名的地址直接拒绝。
 function normalizeSiteInput(input) {
   const text = String(input || '').trim();
   if (!text) return null;
   const withScheme = /^https?:\/\//i.test(text) ? text : `https://${text}`;
   try {
     const parsed = new URL(withScheme);
-    if (!parsed.hostname || !parsed.hostname.includes('.')) return null;
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return null;
+    if (!isValidSiteHostname(parsed.hostname)) return null;
     const isBareHost = parsed.pathname === '/' && !parsed.search && !parsed.hash;
     return {
       domain: parsed.hostname.toLowerCase(),

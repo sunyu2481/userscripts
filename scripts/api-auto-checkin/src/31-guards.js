@@ -108,8 +108,20 @@ function isOnLoginPage() {
 function looksLoggedOut() {
   if (isOnLoginPage()) return true;
 
-  const text = String(document.body?.innerText || '').slice(0, 3000);
-  if (LOGIN_TEXT_PATTERN.test(text)) return true;
+  // 全页正文里的“登录后可用”常常只是帮助说明。只有短小、像专门提示页的
+  // 正文才直接采信；长页面只看提示框和登录按钮。
+  const bodyText = String(document.body?.innerText || '').slice(0, 401).replace(/\s+/g, ' ').trim();
+  if (bodyText.length <= 400 && LOGIN_TEXT_PATTERN.test(bodyText)) return true;
+
+  const notices = document.querySelectorAll(
+    '[role="alert"], [role="status"], [role="dialog"], [class*="toast" i], ' +
+    '[class*="message" i], [class*="notification" i]'
+  );
+  for (const notice of notices) {
+    if (!isVisible(notice)) continue;
+    const text = String(notice.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text.length <= 300 && LOGIN_TEXT_PATTERN.test(text)) return true;
+  }
 
   // 页面上只有登录按钮、找不到签到按钮，也当作未登录
   for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {

@@ -88,6 +88,12 @@ test('超出时间窗口的任务不认领', () => {
   assert.equal(M.isJobFresh(job, 'aa.bb.com', now + M.JOB_CLAIM_WINDOW_MS + 1), false);
 });
 
+test('来自未来的任务不认领', () => {
+  const now = 1_000_000;
+  const job = { site: { domain: 'aa.bb.com' }, assignedAt: now + 1 };
+  assert.equal(M.isJobFresh(job, 'aa.bb.com', now), false);
+});
+
 test('已被认领的任务不再认领', () => {
   const now = 1_000_000;
   const job = { site: { domain: 'aa.bb.com' }, assignedAt: now, claimedAt: now + 100 };
@@ -117,6 +123,13 @@ test('间隔落在配置区间内', () => {
 test('最大值小于最小值时不会产生负间隔', () => {
   const gap = M.pickGap({ gapMinMs: 5000, gapMaxMs: 1000 });
   assert.ok(gap >= 5000);
+});
+
+test('非有限间隔不会产生 NaN', () => {
+  assert.equal(M.pickGap({ gapMinMs: Infinity, gapMaxMs: Infinity }), 0);
+  const gap = M.pickGap({ gapMinMs: NaN, gapMaxMs: 1000 });
+  assert.ok(Number.isFinite(gap));
+  assert.ok(gap >= 0 && gap <= 1000);
 });
 
 test('结果汇总文案按类别拼接', () => {

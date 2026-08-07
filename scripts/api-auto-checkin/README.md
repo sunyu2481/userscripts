@@ -44,6 +44,8 @@ https://example.com/#/checkin      ← hash 路由的也支持
 
 填对页面比填对域名重要 —— 脚本要在这个页面上找按钮。
 
+脚本元数据只匹配 HTTPS 页面，因此新增或导入的站点地址必须使用 `https://`。
+
 地址会原样打开，不追加任何参数。hash 路由（`/#/checkin`）如果被前端在初始化时冲掉（落到首页），脚本会纠正回目标路由再找按钮。
 
 点站点行的 `✎` 可以改**名称、地址、按钮和结果文案、仅访问模式**，都在同一个对话框里。添加时也能直接填名称和勾选仅访问。
@@ -101,7 +103,7 @@ https://example.com/#/checkin      ← hash 路由的也支持
 
 ```bash
 node build.js              # src/ 拼成单文件
-node --test test/*.test.js # 74 个测试
+node --test test/*.test.js # 运行全部测试
 ```
 
 `src/` 按文件名顺序拼接：

@@ -317,6 +317,14 @@ test('未登录提示能被识别', () => {
   assert.equal(hasCheckIn.M.looksLoggedOut(), false);
 });
 
+test('长页面里的登录帮助文案不算登出', () => {
+  const { M } = setup([
+    { tag: 'p', text: `${'帮助说明'.repeat(100)} 登录后可以使用更多功能` },
+    { tag: 'button', text: '查看文档' }
+  ]);
+  assert.equal(M.looksLoggedOut(), false);
+});
+
 test('失效页面识别标题与短正文', () => {
   const byTitle = setup([{ tag: 'div', text: '空' }], { title: '404 Not Found' });
   assert.equal(byTitle.M.looksLikeInvalidPage(), true);

@@ -144,6 +144,10 @@ function handleAddSite(rawInput, visitOnly, name = '') {
   }
 
   const trimmedName = String(name || '').replace(/\s+/g, ' ').trim();
+  if (trimmedName.length > 40) {
+    showToast('名称太长了');
+    return;
+  }
   sites.push({
     domain: parsed.domain,
     name: trimmedName || parsed.domain,
@@ -265,6 +269,8 @@ function buildBackupPayload() {
 }
 
 function parseBackupPayload(text) {
+  if (String(text || '').length > 1000000) return { error: '备份文件太大' };
+
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -278,8 +284,16 @@ function parseBackupPayload(text) {
   const sites = [];
   for (const site of rawSites) {
     const domain = String(site?.domain || '').trim().toLowerCase();
-    if (!domain || !domain.includes('.')) continue;
-    const name = String(site.name || domain);
+    const domainInput = normalizeSiteInput(domain);
+    if (!domainInput || domainInput.domain !== domain) continue;
+
+    const pageInput = site.pageUrl
+      ? normalizeSiteInput(site.pageUrl)
+      : domainInput;
+    if (!pageInput || pageInput.domain !== domain) continue;
+
+    const rawName = String(site.name || domain).replace(/\s+/g, ' ').trim();
+    const name = rawName && rawName.length <= 40 ? rawName : domain;
     sites.push({
       domain,
       name,
@@ -287,7 +301,7 @@ function parseBackupPayload(text) {
       // 避免导入后又被页面标题覆盖掉
       nameLocked: site.nameLocked === true || (name !== domain && name !== ''),
       enabled: site.enabled !== false,
-      pageUrl: String(site.pageUrl || ''),
+      pageUrl: pageInput.pageUrl,
       // 兼容旧版扩展导出的 mode 字段
       visitOnly: site.visitOnly === true || site.mode === 'visit',
       buttonWords: normalizeConfiguredWords(site.buttonWords),
@@ -295,8 +309,12 @@ function parseBackupPayload(text) {
     });
   }
 
-  if (sites.length === 0) return { error: '没有可导入的站点' };
-  return { sites, settings: parsed?.settings || null };
+  const deduped = dedupeSitesByDomain(sites);
+  if (deduped.length === 0) return { error: '没有可导入的站点' };
+  return {
+    sites: deduped,
+    settings: isRecord(parsed?.settings) ? sanitizeSettings(parsed.settings) : null
+  };
 }
 
 function handleExport() {

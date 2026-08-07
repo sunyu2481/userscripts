@@ -44,6 +44,45 @@ const DEFAULT_SETTINGS = {
   extraButtonWords: ''   // 用户自定义的签到按钮关键词，逗号分隔
 };
 
+const MAX_GAP_MS = 600000;
+const MIN_SITE_TIMEOUT_MS = 5000;
+const MAX_SITE_TIMEOUT_MS = 600000;
+const MAX_EXTRA_WORDS_LENGTH = 1000;
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeSettingNumber(value, fallback, min, max) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function sanitizeSettings(value) {
+  const settings = isRecord(value) ? value : {};
+  const gapMinMs = normalizeSettingNumber(
+    settings.gapMinMs, DEFAULT_SETTINGS.gapMinMs, 0, MAX_GAP_MS
+  );
+  const gapMaxMs = Math.max(gapMinMs, normalizeSettingNumber(
+    settings.gapMaxMs, DEFAULT_SETTINGS.gapMaxMs, 0, MAX_GAP_MS
+  ));
+
+  return {
+    gapMinMs,
+    gapMaxMs,
+    siteTimeoutMs: normalizeSettingNumber(
+      settings.siteTimeoutMs,
+      DEFAULT_SETTINGS.siteTimeoutMs,
+      MIN_SITE_TIMEOUT_MS,
+      MAX_SITE_TIMEOUT_MS
+    ),
+    autoCloseTab: settings.autoCloseTab === true,
+    extraButtonWords: String(settings.extraButtonWords || '').trim().slice(0, MAX_EXTRA_WORDS_LENGTH)
+  };
+}
+
 function readValue(key, fallback) {
   try {
     const raw = GM_getValue(key, null);
@@ -59,11 +98,11 @@ function writeValue(key, value) {
 }
 
 function getSettings() {
-  return { ...DEFAULT_SETTINGS, ...readValue(KEY_SETTINGS, {}) };
+  return sanitizeSettings(readValue(KEY_SETTINGS, {}));
 }
 
 function saveSettings(patch) {
-  const next = { ...getSettings(), ...patch };
+  const next = sanitizeSettings({ ...getSettings(), ...(isRecord(patch) ? patch : {}) });
   writeValue(KEY_SETTINGS, next);
   return next;
 }
@@ -81,7 +120,8 @@ function getSites() {
 }
 
 function getResults() {
-  return readValue(KEY_RESULTS, {});
+  const results = readValue(KEY_RESULTS, {});
+  return isRecord(results) ? results : {};
 }
 
 function saveResults(results) {
@@ -89,7 +129,8 @@ function saveResults(results) {
 }
 
 function getRunState() {
-  return readValue(KEY_RUN, { running: false });
+  const state = readValue(KEY_RUN, { running: false });
+  return isRecord(state) ? state : { running: false };
 }
 
 function saveRunState(state) {
@@ -97,7 +138,8 @@ function saveRunState(state) {
 }
 
 function getJob() {
-  return readValue(KEY_JOB, null);
+  const job = readValue(KEY_JOB, null);
+  return isRecord(job) ? job : null;
 }
 
 function saveJob(job) {
@@ -123,7 +165,8 @@ function requestTabFocus(domain) {
 }
 
 function readFocusRequest() {
-  return readValue(KEY_FOCUS, null);
+  const request = readValue(KEY_FOCUS, null);
+  return isRecord(request) ? request : null;
 }
 
 function clearFocusRequest() {
@@ -166,13 +209,16 @@ function dedupeSitesByDomain(sites) {
 }
 
 // 配置文案只保存普通文本，不把用户输入当作正则表达式。
-function normalizeConfiguredWords(value, maxLength = 40) {
+const MAX_CONFIGURED_WORDS = 30;
+
+function normalizeConfiguredWords(value, maxLength = 40, maxItems = MAX_CONFIGURED_WORDS) {
   const raw = Array.isArray(value) ? value : String(value || '').split(/[,，\n]/);
   const words = [];
   for (const item of raw) {
     const word = String(item || '').replace(/\s+/g, ' ').trim();
     if (!word || word.length > maxLength || words.includes(word)) continue;
     words.push(word);
+    if (words.length >= maxItems) break;
   }
   return words;
 }
@@ -197,14 +243,25 @@ function buildSiteConfig(site) {
   };
 }
 
-// 解析用户输入的地址，域名和完整路径都留着
+function isValidSiteHostname(hostname) {
+  const host = String(hostname || '').toLowerCase();
+  if (!host || host.length > 253 || !host.includes('.') || host.endsWith('.')) return false;
+  return host.split('.').every(label =>
+    label.length > 0 && label.length <= 63 &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+  );
+}
+
+// 解析用户输入的地址，域名和完整路径都留着。脚本只匹配 HTTPS 页面，
+// 因此显式 HTTP、带账号密码或非法主机名的地址直接拒绝。
 function normalizeSiteInput(input) {
   const text = String(input || '').trim();
   if (!text) return null;
   const withScheme = /^https?:\/\//i.test(text) ? text : `https://${text}`;
   try {
     const parsed = new URL(withScheme);
-    if (!parsed.hostname || !parsed.hostname.includes('.')) return null;
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) return null;
+    if (!isValidSiteHostname(parsed.hostname)) return null;
     const isBareHost = parsed.pathname === '/' && !parsed.search && !parsed.hash;
     return {
       domain: parsed.hostname.toLowerCase(),
@@ -729,8 +786,20 @@ function isOnLoginPage() {
 function looksLoggedOut() {
   if (isOnLoginPage()) return true;
 
-  const text = String(document.body?.innerText || '').slice(0, 3000);
-  if (LOGIN_TEXT_PATTERN.test(text)) return true;
+  // 全页正文里的“登录后可用”常常只是帮助说明。只有短小、像专门提示页的
+  // 正文才直接采信；长页面只看提示框和登录按钮。
+  const bodyText = String(document.body?.innerText || '').slice(0, 401).replace(/\s+/g, ' ').trim();
+  if (bodyText.length <= 400 && LOGIN_TEXT_PATTERN.test(bodyText)) return true;
+
+  const notices = document.querySelectorAll(
+    '[role="alert"], [role="status"], [role="dialog"], [class*="toast" i], ' +
+    '[class*="message" i], [class*="notification" i]'
+  );
+  for (const notice of notices) {
+    if (!isVisible(notice)) continue;
+    const text = String(notice.innerText || '').replace(/\s+/g, ' ').trim();
+    if (text.length <= 300 && LOGIN_TEXT_PATTERN.test(text)) return true;
+  }
 
   // 页面上只有登录按钮、找不到签到按钮，也当作未登录
   for (const el of document.querySelectorAll(CLICKABLE_SELECTOR)) {
@@ -1091,19 +1160,30 @@ function installNetworkHooks() {
   const originalFetch = window.fetch;
   const originalOpen = window.XMLHttpRequest?.prototype?.open;
   const originalSend = window.XMLHttpRequest?.prototype?.send;
+  const xhrRequests = new WeakMap();
+
+  function getRequestInfo(url, method) {
+    try {
+      if (!url) return null;
+      const path = new URL(String(url), location.origin).pathname.toLowerCase();
+      const normalizedMethod = String(method || 'GET').toUpperCase();
+      if (!isCheckInPath(path) && normalizedMethod !== 'POST') return null;
+      return { url: String(url), method: normalizedMethod, path };
+    } catch (e) {
+      return null;
+    }
+  }
 
   function record(url, method, status, text) {
     try {
       if (!url || !text) return;
       // 只留可能与签到有关的请求，避免堆积无关响应
-      const path = new URL(String(url), location.origin).pathname.toLowerCase();
-      const isCheckInish = isCheckInPath(path);
-      const isPost = String(method || 'GET').toUpperCase() === 'POST';
-      if (!isCheckInish && !isPost) return;
+      const info = getRequestInfo(url, method);
+      if (!info) return;
       if (text.length > 20000) return;
 
       capturedResponses.push({
-        url: String(url), method, status, text, path, isCheckInish
+        ...info, status, text, isCheckInish: isCheckInPath(info.path)
       });
       // 只保留最近若干条，避免长时间停留的页面无限增长
       if (capturedResponses.length > 12) capturedResponses.shift();
@@ -1118,9 +1198,11 @@ function installNetworkHooks() {
         const options = args[1] || {};
         const url = typeof request === 'string' ? request : request?.url;
         const method = String(options.method || request?.method || 'GET');
-        if (url) {
-          const text = await response.clone().text();
-          record(url, method, response.status, text);
+        if (getRequestInfo(url, method)) {
+          // 读取副本不能阻塞页面拿到原响应；失败也不影响页面请求。
+          Promise.resolve(response.clone().text())
+            .then(text => record(url, method, response.status, text))
+            .catch(() => {});
         }
       } catch (e) { /* 克隆失败忽略 */ }
       return response;
@@ -1129,15 +1211,25 @@ function installNetworkHooks() {
 
   if (originalOpen && originalSend) {
     window.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      this.__ci = { method, url: String(url || '') };
+      xhrRequests.set(this, { method, url: String(url || '') });
       return originalOpen.call(this, method, url, ...rest);
     };
     window.XMLHttpRequest.prototype.send = function (...args) {
       try {
-        this.addEventListener('load', () => {
-          const info = this.__ci || {};
-          record(info.url, info.method, this.status, this.responseText || '');
-        }, { once: true });
+        const info = xhrRequests.get(this);
+        if (getRequestInfo(info?.url, info?.method)) {
+          this.addEventListener('load', () => {
+            try {
+              let text = '';
+              if (this.responseType === 'json') {
+                text = JSON.stringify(this.response ?? null);
+              } else if (!this.responseType || this.responseType === 'text') {
+                text = this.responseText || '';
+              }
+              record(info.url, info.method, this.status, text);
+            } catch (e) { /* 非文本响应或读取失败时跳过 */ }
+          }, { once: true });
+        }
       } catch (e) { /* 忽略 */ }
       return originalSend.apply(this, args);
     };
@@ -1353,7 +1445,8 @@ function isFocusRequestForMe(request, host, now = Date.now()) {
   if (!request?.domain) return false;
   if (request.domain !== host) return false;
   // 过期请求不响应，避免刷新页面时被历史请求带到前台
-  return now - Number(request.at || 0) <= FOCUS_REQUEST_TTL_MS;
+  return now >= Number(request.at || 0) &&
+    now - Number(request.at || 0) <= FOCUS_REQUEST_TTL_MS;
 }
 
 function focusSelf() {
@@ -1418,6 +1511,40 @@ function watchFocusRequests(host) {
 // 只在你点"开始签到"的那个页面运行。
 
 let coordinatorAborted = false;
+let activeCoordinatorRunId = null;
+let cancelCoordinatorWait = null;
+
+const RUN_STATE_TTL_MS = 15 * 60 * 1000;
+
+function createRunId(now = Date.now()) {
+  return `${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isRunStateFresh(state, now = Date.now()) {
+  if (state?.running !== true) return false;
+  const timestamp = Date.parse(state.updatedAt || state.startedAt || '');
+  if (!Number.isFinite(timestamp)) return false;
+  const age = now - timestamp;
+  return age >= 0 && age <= RUN_STATE_TTL_MS;
+}
+
+function isRunAbortRequested(runId, state = getRunState()) {
+  return Boolean(runId && state?.runId === runId && state.abortRequestedAt);
+}
+
+function ownsRun(runId, state = getRunState()) {
+  return Boolean(runId && state?.running === true && state.runId === runId);
+}
+
+function saveActiveRunState(runId, startedAt, patch = {}) {
+  saveRunState({
+    running: true,
+    runId,
+    startedAt,
+    updatedAt: new Date().toISOString(),
+    ...patch
+  });
+}
 
 // 本轮开过的标签页。GM_openInTab 返回的句柄是活对象，
 // 存不进 GM_setValue，只能留在协调者页面的内存里。
@@ -1458,9 +1585,12 @@ function shouldKeepTabOpen(result) {
   return result?.needsHuman === true || result?.needsLogin === true;
 }
 
-function pickGap(settings) {
-  const min = Math.max(0, Number(settings.gapMinMs) || 0);
-  const max = Math.max(min, Number(settings.gapMaxMs) || min);
+function pickGap(settings = {}) {
+  const rawMin = Number(settings.gapMinMs);
+  const rawMax = Number(settings.gapMaxMs);
+  const min = Number.isFinite(rawMin) ? Math.max(0, rawMin) : 0;
+  const max = Number.isFinite(rawMax) ? Math.max(min, rawMax) : min;
+  if (max === min) return min;
   return min + Math.random() * (max - min);
 }
 
@@ -1474,22 +1604,52 @@ function isJobFresh(job, host, now = Date.now()) {
   if (job.claimedAt) return false;   // 已经被认领过，不再重复
   const assignedAt = Number(job.assignedAt || 0);
   if (!assignedAt) return false;
-  return now - assignedAt <= JOB_CLAIM_WINDOW_MS;
+  const age = now - assignedAt;
+  return age >= 0 && age <= JOB_CLAIM_WINDOW_MS;
 }
 
 // 等某个站点的结果写入，或超时
-function waitForSiteResult(siteId, timeoutMs) {
-  return new Promise((resolve) => {
+function waitForSiteResult(siteId, timeoutMs, runId = null) {
+  return new Promise((resolve, reject) => {
     let listenerId = null;
+    let runListenerId = null;
     let timer = null;
+    let settled = false;
 
-    function finish(result) {
+    function cleanup() {
       if (listenerId !== null) {
         try { GM_removeValueChangeListener(listenerId); } catch (e) { /* 已移除 */ }
         listenerId = null;
       }
+      if (runListenerId !== null) {
+        try { GM_removeValueChangeListener(runListenerId); } catch (e) { /* 已移除 */ }
+        runListenerId = null;
+      }
       if (timer) clearTimeout(timer);
+      if (cancelCoordinatorWait === cancel) cancelCoordinatorWait = null;
+    }
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve(result);
+    }
+
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+
+    function cancel() {
+      finish({ status: 'failed', message: '已中断', aborted: true });
+    }
+
+    if (runId && isRunAbortRequested(runId)) {
+      cancel();
+      return;
     }
 
     // 先查一次，避免结果早于监听写入
@@ -1499,22 +1659,50 @@ function waitForSiteResult(siteId, timeoutMs) {
       return;
     }
 
-    listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue, remote) => {
-      if (!remote) return;
-      let parsed = null;
-      try {
-        parsed = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
-      } catch (e) {
-        return;
-      }
-      const result = parsed?.[siteId];
-      if (result && result.status !== 'checking') finish(result);
-    });
+    try {
+      listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue, remote) => {
+        if (!remote) return;
+        let parsed = null;
+        try {
+          parsed = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
+        } catch (e) {
+          return;
+        }
+        const result = parsed?.[siteId];
+        if (result && result.status !== 'checking') finish(result);
+      });
 
-    timer = setTimeout(() => {
-      finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
-    }, timeoutMs);
+      if (runId) {
+        runListenerId = GM_addValueChangeListener(KEY_RUN, (name, oldValue, newValue) => {
+          let state = null;
+          try {
+            state = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
+          } catch (e) {
+            return;
+          }
+          if (isRunAbortRequested(runId, state)) cancel();
+        });
+        cancelCoordinatorWait = cancel;
+        if (isRunAbortRequested(runId)) cancel();
+      }
+
+      if (settled) return;
+      timer = setTimeout(() => {
+        finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
+      }, timeoutMs);
+    } catch (error) {
+      fail(error);
+    }
   });
+}
+
+async function waitForBatchGap(ms, runId) {
+  const deadline = Date.now() + Math.max(0, Number(ms) || 0);
+  while (Date.now() < deadline) {
+    if (isRunAbortRequested(runId)) return false;
+    await sleep(Math.min(500, deadline - Date.now()));
+  }
+  return !isRunAbortRequested(runId);
 }
 
 async function runBatchCheckIn(siteIds = null) {
@@ -1528,86 +1716,117 @@ async function runBatchCheckIn(siteIds = null) {
     return;
   }
 
-  coordinatorAborted = false;
-
-  // 清空上一轮结果。
-  // 单站点重试只清该站点，别抹掉其它站点已有的结果。
-  if (siteIds) {
-    const kept = getResults();
-    for (const siteId of siteIds) delete kept[siteId];
-    saveResults(kept);
-  } else {
-    saveResults({});
+  if (isRunStateFresh(getRunState())) {
+    showToast('已有签到任务正在运行');
+    return;
   }
 
-  saveRunState({
-    running: true,
-    total: targets.length,
-    current: 0,
-    startedAt: new Date().toISOString()
-  });
-  renderPanel();
-
+  coordinatorAborted = false;
+  const runId = createRunId();
+  const startedAt = new Date().toISOString();
+  activeCoordinatorRunId = runId;
   const collected = {};
 
-  for (let index = 0; index < targets.length; index++) {
-    if (coordinatorAborted) break;
+  try {
+    // 多个页面可能在同一瞬间都读到“空闲”。先各自写入 runId，短暂让出事件循环，
+    // 再确认最终所有权；只有最后仍持有共享状态的页面可以继续。
+    saveActiveRunState(runId, startedAt, { total: targets.length, current: 0 });
+    await sleep(50 + Math.random() * 100);
+    if (!ownsRun(runId)) {
+      showToast('已有签到任务正在运行');
+      return;
+    }
 
-    const site = targets[index];
-    saveRunState({
-      running: true,
-      total: targets.length,
-      current: index + 1,
-      currentSiteId: site.siteId,
-      startedAt: new Date().toISOString()
-    });
+    // 清空上一轮结果。
+    // 单站点重试只清该站点，别抹掉其它站点已有的结果。
+    if (siteIds) {
+      const kept = getResults();
+      for (const siteId of siteIds) delete kept[siteId];
+      saveResults(kept);
+    } else {
+      saveResults({});
+    }
 
-    // 任务只在派出后的短时间内有效。这样同域其它已打开的标签页即便
-    // 之后发生导航，也不会认领到这个任务、重复签到。
-    // 不往 URL 上加任何标记：站点可能用 hash 路由（如 /#/checkin），
-    // 动了 URL 就会把路由改坏。
-    saveJob({ site, assignedAt: Date.now() });
     renderPanel();
 
-    let handle = null;
-    try {
-      handle = GM_openInTab(site.visitUrl, {
-        active: false,
-        insert: true,
-        setParent: true
+    for (let index = 0; index < targets.length; index++) {
+      if (coordinatorAborted || isRunAbortRequested(runId)) {
+        coordinatorAborted = true;
+        break;
+      }
+
+      const site = targets[index];
+      saveActiveRunState(runId, startedAt, {
+        total: targets.length,
+        current: index + 1,
+        currentSiteId: site.siteId
       });
-    } catch (e) {
-      collected[site.siteId] = { status: 'failed', message: `打开标签页失败: ${e.message}` };
-      saveResults({ ...getResults(), ...collected });
+      // 任务只在派出后的短时间内有效。这样同域其它已打开的标签页即便
+      // 之后发生导航，也不会认领到这个任务、重复签到。
+      // 不往 URL 上加任何标记：站点可能用 hash 路由（如 /#/checkin），
+      // 动了 URL 就会把路由改坏。
+      saveJob({ site, assignedAt: Date.now() });
+      renderPanel();
+
+      let handle = null;
+      try {
+        handle = GM_openInTab(site.visitUrl, {
+          active: false,
+          insert: true,
+          setParent: true
+        });
+      } catch (e) {
+        const reason = e?.message || String(e || '未知错误');
+        collected[site.siteId] = { status: 'failed', message: `打开标签页失败: ${reason}` };
+        saveResults({ ...getResults(), ...collected });
+        clearJob();
+        continue;
+      }
+
+      const result = await waitForSiteResult(site.siteId, settings.siteTimeoutMs, runId);
+      collected[site.siteId] = result;
+      if (result.aborted || isRunAbortRequested(runId)) coordinatorAborted = true;
+
+      // 默认把标签页留着，让你能自己核对签到结果。
+      // 攒下句柄，之后用面板上的「关闭标签页」一次性关掉。
+      if (handle) {
+        rememberOpenedTab(site.siteId, site.siteName, handle);
+      }
+      if (settings.autoCloseTab === true && !shouldKeepTabOpen(result)) {
+        closeRememberedTab(site.siteId);
+      }
+
       clearJob();
-      continue;
-    }
+      renderPanel();
 
-    const result = await waitForSiteResult(site.siteId, settings.siteTimeoutMs);
-    collected[site.siteId] = result;
-
-    // 默认把标签页留着，让你能自己核对签到结果。
-    // 攒下句柄，之后用面板上的「关闭标签页」一次性关掉。
-    if (handle) {
-      rememberOpenedTab(site.siteId, site.siteName, handle);
+      if (index < targets.length - 1 && !coordinatorAborted) {
+        const completedGap = await waitForBatchGap(pickGap(settings), runId);
+        if (!completedGap) coordinatorAborted = true;
+      }
     }
-    if (settings.autoCloseTab === true && !shouldKeepTabOpen(result)) {
-      closeRememberedTab(site.siteId);
+  } finally {
+    cancelCoordinatorWait = null;
+    activeCoordinatorRunId = null;
+    const state = getRunState();
+    if (state.runId === runId) {
+      clearJob();
+      saveRunState({
+        running: false,
+        runId,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        aborted: coordinatorAborted
+      });
     }
-
-    clearJob();
     renderPanel();
-
-    if (index < targets.length - 1 && !coordinatorAborted) {
-      await sleep(pickGap(settings));
-    }
   }
 
-  clearJob();
-  saveLastCheckInTime(new Date().toISOString());
-  saveRunState({ running: false, finishedAt: new Date().toISOString() });
-  renderPanel();
+  if (coordinatorAborted) {
+    showToast('已终止');
+    return;
+  }
 
+  saveLastCheckInTime(new Date().toISOString());
   const summary = summarizeResults(collected);
   const remaining = getOpenedTabCount();
   showToast(remaining > 0
@@ -1616,8 +1835,22 @@ async function runBatchCheckIn(siteIds = null) {
 }
 
 function abortBatchCheckIn() {
-  coordinatorAborted = true;
-  clearJob();
+  const state = getRunState();
+  if (state.running !== true) {
+    showToast('当前没有运行中的任务');
+    return false;
+  }
+
+  saveRunState({
+    ...state,
+    abortRequestedAt: Date.now(),
+    updatedAt: new Date().toISOString()
+  });
+
+  if (!state.runId || state.runId === activeCoordinatorRunId) {
+    coordinatorAborted = true;
+    cancelCoordinatorWait?.();
+  }
 
   const results = getResults();
   for (const [siteId, result] of Object.entries(results)) {
@@ -1626,9 +1859,9 @@ function abortBatchCheckIn() {
     }
   }
   saveResults(results);
-  saveRunState({ running: false, finishedAt: new Date().toISOString() });
   renderPanel();
-  showToast('已终止');
+  showToast('正在终止');
+  return true;
 }
 
 function summarizeResults(results) {
@@ -1661,7 +1894,7 @@ const STYLE_ID = 'gm-checkin-style';
 const PANEL_CSS = `
 #${PANEL_ID} {
   position: fixed; right: 16px; bottom: 16px; z-index: 2147483000;
-  width: 320px; max-height: 70vh; overflow: hidden;
+  width: min(320px, calc(100vw - 32px)); max-height: 70vh; overflow: hidden;
   display: flex; flex-direction: column;
   background: #fff; color: #1f2328;
   border: 1px solid #d0d7de; border-radius: 10px;
@@ -1901,6 +2134,7 @@ function renderPanel() {
   const results = getResults();
   const runState = getRunState();
   const running = runState.running === true;
+  const aborting = running && Boolean(runState.abortRequestedAt);
   const enabledCount = sites.filter(s => s.enabled).length;
 
   const parts = [];
@@ -1918,7 +2152,11 @@ function renderPanel() {
       <button class="gm-btn primary" data-act="start" ${running || enabledCount === 0 ? 'disabled' : ''}>
         ${running ? '签到中...' : '开始签到'}
       </button>
-      ${running ? '<button class="gm-btn danger" data-act="abort">终止</button>' : ''}
+      ${running
+        ? `<button class="gm-btn danger" data-act="abort" ${aborting ? 'disabled' : ''}>${
+          aborting ? '终止中...' : '终止'
+        }</button>`
+        : ''}
       ${!running && openedTabCount > 0
         ? `<button class="gm-btn" data-act="close-tabs">关闭 ${openedTabCount} 个标签页</button>`
         : ''}
@@ -2167,6 +2405,10 @@ function handleAddSite(rawInput, visitOnly, name = '') {
   }
 
   const trimmedName = String(name || '').replace(/\s+/g, ' ').trim();
+  if (trimmedName.length > 40) {
+    showToast('名称太长了');
+    return;
+  }
   sites.push({
     domain: parsed.domain,
     name: trimmedName || parsed.domain,
@@ -2288,6 +2530,8 @@ function buildBackupPayload() {
 }
 
 function parseBackupPayload(text) {
+  if (String(text || '').length > 1000000) return { error: '备份文件太大' };
+
   let parsed;
   try {
     parsed = JSON.parse(text);
@@ -2301,8 +2545,16 @@ function parseBackupPayload(text) {
   const sites = [];
   for (const site of rawSites) {
     const domain = String(site?.domain || '').trim().toLowerCase();
-    if (!domain || !domain.includes('.')) continue;
-    const name = String(site.name || domain);
+    const domainInput = normalizeSiteInput(domain);
+    if (!domainInput || domainInput.domain !== domain) continue;
+
+    const pageInput = site.pageUrl
+      ? normalizeSiteInput(site.pageUrl)
+      : domainInput;
+    if (!pageInput || pageInput.domain !== domain) continue;
+
+    const rawName = String(site.name || domain).replace(/\s+/g, ' ').trim();
+    const name = rawName && rawName.length <= 40 ? rawName : domain;
     sites.push({
       domain,
       name,
@@ -2310,7 +2562,7 @@ function parseBackupPayload(text) {
       // 避免导入后又被页面标题覆盖掉
       nameLocked: site.nameLocked === true || (name !== domain && name !== ''),
       enabled: site.enabled !== false,
-      pageUrl: String(site.pageUrl || ''),
+      pageUrl: pageInput.pageUrl,
       // 兼容旧版扩展导出的 mode 字段
       visitOnly: site.visitOnly === true || site.mode === 'visit',
       buttonWords: normalizeConfiguredWords(site.buttonWords),
@@ -2318,8 +2570,12 @@ function parseBackupPayload(text) {
     });
   }
 
-  if (sites.length === 0) return { error: '没有可导入的站点' };
-  return { sites, settings: parsed?.settings || null };
+  const deduped = dedupeSitesByDomain(sites);
+  if (deduped.length === 0) return { error: '没有可导入的站点' };
+  return {
+    sites: deduped,
+    settings: isRecord(parsed?.settings) ? sanitizeSettings(parsed.settings) : null
+  };
 }
 
 function handleExport() {
@@ -2353,12 +2609,23 @@ function handleImport() {
 // ===== 自定义对话框 =====
 // 沿用扩展版约定：不使用原生 confirm / prompt
 const DIALOG_ID = 'gm-checkin-dialog';
+let activeDialog = null;
 
-function removeDialog() {
-  document.getElementById(DIALOG_ID)?.remove();
+function removeDialog(notifyDismiss = true) {
+  const dialog = activeDialog;
+  activeDialog = null;
+
+  if (!dialog) {
+    document.getElementById(DIALOG_ID)?.remove();
+    return;
+  }
+
+  dialog.overlay.remove();
+  document.removeEventListener('keydown', dialog.onEsc);
+  if (notifyDismiss) dialog.onDismiss?.();
 }
 
-function createDialogShell(title) {
+function createDialogShell(title, options = {}) {
   removeDialog();
   injectStyle();
 
@@ -2373,7 +2640,8 @@ function createDialogShell(title) {
   const box = document.createElement('div');
   box.style.cssText = `
     width: min(460px, 92vw); background: #fff; color: #1f2328;
-    border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.24);
+    max-height: 92vh; display: flex; flex-direction: column;
+    border-radius: 8px; box-shadow: 0 12px 32px rgba(0,0,0,.24);
     font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
     overflow: hidden;
   `;
@@ -2384,7 +2652,7 @@ function createDialogShell(title) {
 
   box.innerHTML = `
     <div style="padding:12px 14px;background:#667eea;color:#fff;font-weight:600">${escapeHtml(title)}</div>
-    <div data-role="content" style="padding:14px"></div>
+    <div data-role="content" style="padding:14px;overflow-y:auto"></div>
     <div data-role="footer" style="padding:0 14px 14px;display:flex;gap:8px;justify-content:flex-end"></div>
   `;
 
@@ -2394,12 +2662,13 @@ function createDialogShell(title) {
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay) removeDialog();
   });
-  document.addEventListener('keydown', function onEsc(event) {
+  function onEsc(event) {
     if (event.key === 'Escape') {
       removeDialog();
-      document.removeEventListener('keydown', onEsc);
     }
-  });
+  }
+  document.addEventListener('keydown', onEsc);
+  activeDialog = { overlay, onEsc, onDismiss: options.onDismiss };
 
   return {
     overlay,
@@ -2424,14 +2693,28 @@ function makeDialogButton(label, variant = 'default') {
 
 function showConfirm(message) {
   return new Promise((resolve) => {
-    const { content, footer } = createDialogShell('请确认');
+    let settled = false;
+    const { content, footer } = createDialogShell('请确认', {
+      onDismiss: () => {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      }
+    });
     content.textContent = message;
+
+    function finish(value) {
+      if (settled) return;
+      settled = true;
+      removeDialog(false);
+      resolve(value);
+    }
 
     const cancel = makeDialogButton('取消');
     const ok = makeDialogButton('确定', 'danger');
 
-    cancel.addEventListener('click', () => { removeDialog(); resolve(false); });
-    ok.addEventListener('click', () => { removeDialog(); resolve(true); });
+    cancel.addEventListener('click', () => finish(false));
+    ok.addEventListener('click', () => finish(true));
 
     footer.append(cancel, ok);
     ok.focus();

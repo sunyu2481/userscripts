@@ -2,6 +2,40 @@
 // 只在你点"开始签到"的那个页面运行。
 
 let coordinatorAborted = false;
+let activeCoordinatorRunId = null;
+let cancelCoordinatorWait = null;
+
+const RUN_STATE_TTL_MS = 15 * 60 * 1000;
+
+function createRunId(now = Date.now()) {
+  return `${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function isRunStateFresh(state, now = Date.now()) {
+  if (state?.running !== true) return false;
+  const timestamp = Date.parse(state.updatedAt || state.startedAt || '');
+  if (!Number.isFinite(timestamp)) return false;
+  const age = now - timestamp;
+  return age >= 0 && age <= RUN_STATE_TTL_MS;
+}
+
+function isRunAbortRequested(runId, state = getRunState()) {
+  return Boolean(runId && state?.runId === runId && state.abortRequestedAt);
+}
+
+function ownsRun(runId, state = getRunState()) {
+  return Boolean(runId && state?.running === true && state.runId === runId);
+}
+
+function saveActiveRunState(runId, startedAt, patch = {}) {
+  saveRunState({
+    running: true,
+    runId,
+    startedAt,
+    updatedAt: new Date().toISOString(),
+    ...patch
+  });
+}
 
 // 本轮开过的标签页。GM_openInTab 返回的句柄是活对象，
 // 存不进 GM_setValue，只能留在协调者页面的内存里。
@@ -42,9 +76,12 @@ function shouldKeepTabOpen(result) {
   return result?.needsHuman === true || result?.needsLogin === true;
 }
 
-function pickGap(settings) {
-  const min = Math.max(0, Number(settings.gapMinMs) || 0);
-  const max = Math.max(min, Number(settings.gapMaxMs) || min);
+function pickGap(settings = {}) {
+  const rawMin = Number(settings.gapMinMs);
+  const rawMax = Number(settings.gapMaxMs);
+  const min = Number.isFinite(rawMin) ? Math.max(0, rawMin) : 0;
+  const max = Number.isFinite(rawMax) ? Math.max(min, rawMax) : min;
+  if (max === min) return min;
   return min + Math.random() * (max - min);
 }
 
@@ -58,22 +95,52 @@ function isJobFresh(job, host, now = Date.now()) {
   if (job.claimedAt) return false;   // 已经被认领过，不再重复
   const assignedAt = Number(job.assignedAt || 0);
   if (!assignedAt) return false;
-  return now - assignedAt <= JOB_CLAIM_WINDOW_MS;
+  const age = now - assignedAt;
+  return age >= 0 && age <= JOB_CLAIM_WINDOW_MS;
 }
 
 // 等某个站点的结果写入，或超时
-function waitForSiteResult(siteId, timeoutMs) {
-  return new Promise((resolve) => {
+function waitForSiteResult(siteId, timeoutMs, runId = null) {
+  return new Promise((resolve, reject) => {
     let listenerId = null;
+    let runListenerId = null;
     let timer = null;
+    let settled = false;
 
-    function finish(result) {
+    function cleanup() {
       if (listenerId !== null) {
         try { GM_removeValueChangeListener(listenerId); } catch (e) { /* 已移除 */ }
         listenerId = null;
       }
+      if (runListenerId !== null) {
+        try { GM_removeValueChangeListener(runListenerId); } catch (e) { /* 已移除 */ }
+        runListenerId = null;
+      }
       if (timer) clearTimeout(timer);
+      if (cancelCoordinatorWait === cancel) cancelCoordinatorWait = null;
+    }
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve(result);
+    }
+
+    function fail(error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    }
+
+    function cancel() {
+      finish({ status: 'failed', message: '已中断', aborted: true });
+    }
+
+    if (runId && isRunAbortRequested(runId)) {
+      cancel();
+      return;
     }
 
     // 先查一次，避免结果早于监听写入
@@ -83,22 +150,50 @@ function waitForSiteResult(siteId, timeoutMs) {
       return;
     }
 
-    listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue, remote) => {
-      if (!remote) return;
-      let parsed = null;
-      try {
-        parsed = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
-      } catch (e) {
-        return;
-      }
-      const result = parsed?.[siteId];
-      if (result && result.status !== 'checking') finish(result);
-    });
+    try {
+      listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue, remote) => {
+        if (!remote) return;
+        let parsed = null;
+        try {
+          parsed = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
+        } catch (e) {
+          return;
+        }
+        const result = parsed?.[siteId];
+        if (result && result.status !== 'checking') finish(result);
+      });
 
-    timer = setTimeout(() => {
-      finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
-    }, timeoutMs);
+      if (runId) {
+        runListenerId = GM_addValueChangeListener(KEY_RUN, (name, oldValue, newValue) => {
+          let state = null;
+          try {
+            state = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
+          } catch (e) {
+            return;
+          }
+          if (isRunAbortRequested(runId, state)) cancel();
+        });
+        cancelCoordinatorWait = cancel;
+        if (isRunAbortRequested(runId)) cancel();
+      }
+
+      if (settled) return;
+      timer = setTimeout(() => {
+        finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
+      }, timeoutMs);
+    } catch (error) {
+      fail(error);
+    }
   });
+}
+
+async function waitForBatchGap(ms, runId) {
+  const deadline = Date.now() + Math.max(0, Number(ms) || 0);
+  while (Date.now() < deadline) {
+    if (isRunAbortRequested(runId)) return false;
+    await sleep(Math.min(500, deadline - Date.now()));
+  }
+  return !isRunAbortRequested(runId);
 }
 
 async function runBatchCheckIn(siteIds = null) {
@@ -112,86 +207,117 @@ async function runBatchCheckIn(siteIds = null) {
     return;
   }
 
-  coordinatorAborted = false;
-
-  // 清空上一轮结果。
-  // 单站点重试只清该站点，别抹掉其它站点已有的结果。
-  if (siteIds) {
-    const kept = getResults();
-    for (const siteId of siteIds) delete kept[siteId];
-    saveResults(kept);
-  } else {
-    saveResults({});
+  if (isRunStateFresh(getRunState())) {
+    showToast('已有签到任务正在运行');
+    return;
   }
 
-  saveRunState({
-    running: true,
-    total: targets.length,
-    current: 0,
-    startedAt: new Date().toISOString()
-  });
-  renderPanel();
-
+  coordinatorAborted = false;
+  const runId = createRunId();
+  const startedAt = new Date().toISOString();
+  activeCoordinatorRunId = runId;
   const collected = {};
 
-  for (let index = 0; index < targets.length; index++) {
-    if (coordinatorAborted) break;
+  try {
+    // 多个页面可能在同一瞬间都读到“空闲”。先各自写入 runId，短暂让出事件循环，
+    // 再确认最终所有权；只有最后仍持有共享状态的页面可以继续。
+    saveActiveRunState(runId, startedAt, { total: targets.length, current: 0 });
+    await sleep(50 + Math.random() * 100);
+    if (!ownsRun(runId)) {
+      showToast('已有签到任务正在运行');
+      return;
+    }
 
-    const site = targets[index];
-    saveRunState({
-      running: true,
-      total: targets.length,
-      current: index + 1,
-      currentSiteId: site.siteId,
-      startedAt: new Date().toISOString()
-    });
+    // 清空上一轮结果。
+    // 单站点重试只清该站点，别抹掉其它站点已有的结果。
+    if (siteIds) {
+      const kept = getResults();
+      for (const siteId of siteIds) delete kept[siteId];
+      saveResults(kept);
+    } else {
+      saveResults({});
+    }
 
-    // 任务只在派出后的短时间内有效。这样同域其它已打开的标签页即便
-    // 之后发生导航，也不会认领到这个任务、重复签到。
-    // 不往 URL 上加任何标记：站点可能用 hash 路由（如 /#/checkin），
-    // 动了 URL 就会把路由改坏。
-    saveJob({ site, assignedAt: Date.now() });
     renderPanel();
 
-    let handle = null;
-    try {
-      handle = GM_openInTab(site.visitUrl, {
-        active: false,
-        insert: true,
-        setParent: true
+    for (let index = 0; index < targets.length; index++) {
+      if (coordinatorAborted || isRunAbortRequested(runId)) {
+        coordinatorAborted = true;
+        break;
+      }
+
+      const site = targets[index];
+      saveActiveRunState(runId, startedAt, {
+        total: targets.length,
+        current: index + 1,
+        currentSiteId: site.siteId
       });
-    } catch (e) {
-      collected[site.siteId] = { status: 'failed', message: `打开标签页失败: ${e.message}` };
-      saveResults({ ...getResults(), ...collected });
+      // 任务只在派出后的短时间内有效。这样同域其它已打开的标签页即便
+      // 之后发生导航，也不会认领到这个任务、重复签到。
+      // 不往 URL 上加任何标记：站点可能用 hash 路由（如 /#/checkin），
+      // 动了 URL 就会把路由改坏。
+      saveJob({ site, assignedAt: Date.now() });
+      renderPanel();
+
+      let handle = null;
+      try {
+        handle = GM_openInTab(site.visitUrl, {
+          active: false,
+          insert: true,
+          setParent: true
+        });
+      } catch (e) {
+        const reason = e?.message || String(e || '未知错误');
+        collected[site.siteId] = { status: 'failed', message: `打开标签页失败: ${reason}` };
+        saveResults({ ...getResults(), ...collected });
+        clearJob();
+        continue;
+      }
+
+      const result = await waitForSiteResult(site.siteId, settings.siteTimeoutMs, runId);
+      collected[site.siteId] = result;
+      if (result.aborted || isRunAbortRequested(runId)) coordinatorAborted = true;
+
+      // 默认把标签页留着，让你能自己核对签到结果。
+      // 攒下句柄，之后用面板上的「关闭标签页」一次性关掉。
+      if (handle) {
+        rememberOpenedTab(site.siteId, site.siteName, handle);
+      }
+      if (settings.autoCloseTab === true && !shouldKeepTabOpen(result)) {
+        closeRememberedTab(site.siteId);
+      }
+
       clearJob();
-      continue;
-    }
+      renderPanel();
 
-    const result = await waitForSiteResult(site.siteId, settings.siteTimeoutMs);
-    collected[site.siteId] = result;
-
-    // 默认把标签页留着，让你能自己核对签到结果。
-    // 攒下句柄，之后用面板上的「关闭标签页」一次性关掉。
-    if (handle) {
-      rememberOpenedTab(site.siteId, site.siteName, handle);
+      if (index < targets.length - 1 && !coordinatorAborted) {
+        const completedGap = await waitForBatchGap(pickGap(settings), runId);
+        if (!completedGap) coordinatorAborted = true;
+      }
     }
-    if (settings.autoCloseTab === true && !shouldKeepTabOpen(result)) {
-      closeRememberedTab(site.siteId);
+  } finally {
+    cancelCoordinatorWait = null;
+    activeCoordinatorRunId = null;
+    const state = getRunState();
+    if (state.runId === runId) {
+      clearJob();
+      saveRunState({
+        running: false,
+        runId,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        aborted: coordinatorAborted
+      });
     }
-
-    clearJob();
     renderPanel();
-
-    if (index < targets.length - 1 && !coordinatorAborted) {
-      await sleep(pickGap(settings));
-    }
   }
 
-  clearJob();
-  saveLastCheckInTime(new Date().toISOString());
-  saveRunState({ running: false, finishedAt: new Date().toISOString() });
-  renderPanel();
+  if (coordinatorAborted) {
+    showToast('已终止');
+    return;
+  }
 
+  saveLastCheckInTime(new Date().toISOString());
   const summary = summarizeResults(collected);
   const remaining = getOpenedTabCount();
   showToast(remaining > 0
@@ -200,8 +326,22 @@ async function runBatchCheckIn(siteIds = null) {
 }
 
 function abortBatchCheckIn() {
-  coordinatorAborted = true;
-  clearJob();
+  const state = getRunState();
+  if (state.running !== true) {
+    showToast('当前没有运行中的任务');
+    return false;
+  }
+
+  saveRunState({
+    ...state,
+    abortRequestedAt: Date.now(),
+    updatedAt: new Date().toISOString()
+  });
+
+  if (!state.runId || state.runId === activeCoordinatorRunId) {
+    coordinatorAborted = true;
+    cancelCoordinatorWait?.();
+  }
 
   const results = getResults();
   for (const [siteId, result] of Object.entries(results)) {
@@ -210,9 +350,9 @@ function abortBatchCheckIn() {
     }
   }
   saveResults(results);
-  saveRunState({ running: false, finishedAt: new Date().toISOString() });
   renderPanel();
-  showToast('已终止');
+  showToast('正在终止');
+  return true;
 }
 
 function summarizeResults(results) {

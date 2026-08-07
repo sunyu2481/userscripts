@@ -81,6 +81,7 @@ function renderPanel() {
   const results = getResults();
   const runState = getRunState();
   const running = runState.running === true;
+  const aborting = running && Boolean(runState.abortRequestedAt);
   const enabledCount = sites.filter(s => s.enabled).length;
 
   const parts = [];
@@ -98,7 +99,11 @@ function renderPanel() {
       <button class="gm-btn primary" data-act="start" ${running || enabledCount === 0 ? 'disabled' : ''}>
         ${running ? '签到中...' : '开始签到'}
       </button>
-      ${running ? '<button class="gm-btn danger" data-act="abort">终止</button>' : ''}
+      ${running
+        ? `<button class="gm-btn danger" data-act="abort" ${aborting ? 'disabled' : ''}>${
+          aborting ? '终止中...' : '终止'
+        }</button>`
+        : ''}
       ${!running && openedTabCount > 0
         ? `<button class="gm-btn" data-act="close-tabs">关闭 ${openedTabCount} 个标签页</button>`
         : ''}

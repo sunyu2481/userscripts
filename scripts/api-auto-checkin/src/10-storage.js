@@ -17,6 +17,45 @@ const DEFAULT_SETTINGS = {
   extraButtonWords: ''   // 用户自定义的签到按钮关键词，逗号分隔
 };
 
+const MAX_GAP_MS = 600000;
+const MIN_SITE_TIMEOUT_MS = 5000;
+const MAX_SITE_TIMEOUT_MS = 600000;
+const MAX_EXTRA_WORDS_LENGTH = 1000;
+
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeSettingNumber(value, fallback, min, max) {
+  if (value === null || value === undefined || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function sanitizeSettings(value) {
+  const settings = isRecord(value) ? value : {};
+  const gapMinMs = normalizeSettingNumber(
+    settings.gapMinMs, DEFAULT_SETTINGS.gapMinMs, 0, MAX_GAP_MS
+  );
+  const gapMaxMs = Math.max(gapMinMs, normalizeSettingNumber(
+    settings.gapMaxMs, DEFAULT_SETTINGS.gapMaxMs, 0, MAX_GAP_MS
+  ));
+
+  return {
+    gapMinMs,
+    gapMaxMs,
+    siteTimeoutMs: normalizeSettingNumber(
+      settings.siteTimeoutMs,
+      DEFAULT_SETTINGS.siteTimeoutMs,
+      MIN_SITE_TIMEOUT_MS,
+      MAX_SITE_TIMEOUT_MS
+    ),
+    autoCloseTab: settings.autoCloseTab === true,
+    extraButtonWords: String(settings.extraButtonWords || '').trim().slice(0, MAX_EXTRA_WORDS_LENGTH)
+  };
+}
+
 function readValue(key, fallback) {
   try {
     const raw = GM_getValue(key, null);
@@ -32,11 +71,11 @@ function writeValue(key, value) {
 }
 
 function getSettings() {
-  return { ...DEFAULT_SETTINGS, ...readValue(KEY_SETTINGS, {}) };
+  return sanitizeSettings(readValue(KEY_SETTINGS, {}));
 }
 
 function saveSettings(patch) {
-  const next = { ...getSettings(), ...patch };
+  const next = sanitizeSettings({ ...getSettings(), ...(isRecord(patch) ? patch : {}) });
   writeValue(KEY_SETTINGS, next);
   return next;
 }
@@ -54,7 +93,8 @@ function getSites() {
 }
 
 function getResults() {
-  return readValue(KEY_RESULTS, {});
+  const results = readValue(KEY_RESULTS, {});
+  return isRecord(results) ? results : {};
 }
 
 function saveResults(results) {
@@ -62,7 +102,8 @@ function saveResults(results) {
 }
 
 function getRunState() {
-  return readValue(KEY_RUN, { running: false });
+  const state = readValue(KEY_RUN, { running: false });
+  return isRecord(state) ? state : { running: false };
 }
 
 function saveRunState(state) {
@@ -70,7 +111,8 @@ function saveRunState(state) {
 }
 
 function getJob() {
-  return readValue(KEY_JOB, null);
+  const job = readValue(KEY_JOB, null);
+  return isRecord(job) ? job : null;
 }
 
 function saveJob(job) {
@@ -96,7 +138,8 @@ function requestTabFocus(domain) {
 }
 
 function readFocusRequest() {
-  return readValue(KEY_FOCUS, null);
+  const request = readValue(KEY_FOCUS, null);
+  return isRecord(request) ? request : null;
 }
 
 function clearFocusRequest() {

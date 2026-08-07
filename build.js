@@ -28,7 +28,7 @@ function discoverScripts() {
     .sort();
 }
 
-function buildOne(name) {
+function buildOne(name, copiedFiles) {
   const dir = path.join(scriptsDir, name);
   process.stdout.write(`\n[${name}]\n`);
   const args = ['build.js'];
@@ -42,6 +42,11 @@ function buildOne(name) {
   }
   fs.mkdirSync(distDir, { recursive: true });
   for (const file of userScripts) {
+    const owner = copiedFiles.get(file);
+    if (owner) {
+      throw new Error(`${name} 与 ${owner} 产出了同名文件 ${file}`);
+    }
+    copiedFiles.set(file, name);
     fs.copyFileSync(path.join(dir, file), path.join(distDir, file));
     process.stdout.write(`  → dist/${file}\n`);
   }
@@ -64,8 +69,18 @@ if (unknown.length > 0) {
 }
 
 let total = 0;
+const copiedFiles = new Map();
 for (const name of targets) {
-  total += buildOne(name).length;
+  total += buildOne(name, copiedFiles).length;
+}
+
+// 全量构建时清掉已经没有来源的旧 bundle；定向构建不能动其它脚本的产物。
+if (requested.length === 0 && fs.existsSync(distDir)) {
+  for (const file of fs.readdirSync(distDir)) {
+    if (!file.endsWith('.user.js') || copiedFiles.has(file)) continue;
+    fs.unlinkSync(path.join(distDir, file));
+    process.stdout.write(`  已移除过期产物 dist/${file}\n`);
+  }
 }
 
 console.log(`\n完成：${targets.length} 个脚本，${total} 个产物在 dist/`);
