@@ -1,11 +1,11 @@
 // ===== 需要停下来的情况 =====
 // 人机验证和未登录都不自动处理，交回给你。
 
-const HUMAN_VERIFICATION_PATTERN = new RegExp([
-  'Security Check', '安全验证', '人机验证', '身份验证', 'Turnstile', 'captcha',
-  '验证码', '请完成验证', 'verify you are human', 'hCaptcha', 'reCAPTCHA',
-  'Checking your browser', 'Just a moment', '请稍候.{0,6}正在验证'
-].join('|'), 'i');
+// 只收明确要求用户完成验证的文案。"身份验证"、"验证码"、"Turnstile"等
+// 单独出现时常常只是安全设置或帮助说明，不能作为当前挑战的证据。
+const HUMAN_VERIFICATION_PATTERN = /(?:Security Check|请(?:先)?完成(?:页面上的|当前的|本次)?(?:人机|安全|滑块)?验证(?:后(?:继续|提交|操作))?|请(?:先)?验证你是人类|验证你是人类|verify(?: that)? you are human|Checking your browser|Just a moment|请稍候.{0,12}正在验证)/i;
+
+const HUMAN_VERIFICATION_TITLE_PATTERN = /(?:Security Check|Checking your browser|Just a moment|verify(?: that)? you are human)/i;
 
 const HUMAN_VERIFICATION_SELECTORS = [
   'iframe[src*="challenges.cloudflare.com"]',
@@ -19,16 +19,71 @@ const HUMAN_VERIFICATION_SELECTORS = [
   'textarea[name="h-captcha-response"]'
 ];
 
-function hasHumanVerification() {
+// 文案只有出现在这些语义区域时才作为验证提示；普通页面正文不做全文扫描。
+const HUMAN_VERIFICATION_TEXT_SELECTORS = [
+  '[role="dialog"]', '[role="alertdialog"]', '[aria-modal="true"]',
+  '[role="alert"]', '[role="status"]',
+  '[class*="challenge" i]', '[class*="captcha" i]', '[class*="turnstile" i]',
+  '[class*="hcaptcha" i]', '[class*="recaptcha" i]',
+  '[id*="challenge" i]', '[id*="captcha" i]', '[id*="turnstile" i]'
+].join(', ');
+
+// 这些组件可能只是站点常驻的被动徽章或 invisible widget，不要求用户操作。
+const PASSIVE_VERIFICATION_SELECTOR = [
+  '[class*="badge" i]', '[class*="invisible" i]',
+  '[data-size="invisible"]', '[data-widget-size="invisible"]',
+  '[aria-hidden="true"]'
+].join(', ');
+
+function isPassiveVerificationElement(el) {
+  try {
+    return Boolean(el?.closest?.(PASSIVE_VERIFICATION_SELECTOR));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isActiveVerificationElement(el) {
+  return Boolean(el && isVisible(el) && !isPassiveVerificationElement(el));
+}
+
+function normalizeVerificationText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim();
+}
+
+function matchesHumanVerificationText(text, maxLength = Infinity) {
+  const normalized = normalizeVerificationText(text);
+  return normalized.length > 0 && normalized.length <= maxLength &&
+    HUMAN_VERIFICATION_PATTERN.test(normalized);
+}
+
+function hasHumanVerificationWidget() {
   for (const selector of HUMAN_VERIFICATION_SELECTORS) {
     try {
-      const el = document.querySelector(selector);
-      if (el && isVisible(el)) return true;
+      for (const el of document.querySelectorAll(selector)) {
+        if (isActiveVerificationElement(el)) return true;
+      }
     } catch (e) { /* 选择器不支持时跳过 */ }
   }
-  // 文本判断只看可见正文，避免命中隐藏的脚本或模板内容
-  const text = String(document.body?.innerText || '').slice(0, 4000);
-  return HUMAN_VERIFICATION_PATTERN.test(text);
+  return false;
+}
+
+function hasHumanVerificationText() {
+  if (HUMAN_VERIFICATION_TITLE_PATTERN.test(String(document.title || ''))) return true;
+
+  try {
+    for (const el of document.querySelectorAll(HUMAN_VERIFICATION_TEXT_SELECTORS)) {
+      if (!isActiveVerificationElement(el)) continue;
+      if (matchesHumanVerificationText(el.innerText)) return true;
+    }
+  } catch (e) { /* 选择器不支持时跳过 */ }
+
+  // 只有内容很短、明显是专门的验证页时才看正文，避免扫到侧栏/帮助文案。
+  return matchesHumanVerificationText(document.body?.innerText, 320);
+}
+
+function hasHumanVerification() {
+  return hasHumanVerificationWidget() || hasHumanVerificationText();
 }
 
 // ===== 登录判断 =====
@@ -102,7 +157,7 @@ function closeBlockingDialogs(buttonWords = null, resultWords = null) {
     if (!isVisible(dialog)) continue;
 
     const dialogText = String(dialog.innerText || '');
-    if (HUMAN_VERIFICATION_PATTERN.test(dialogText)) continue;
+    if (matchesHumanVerificationText(dialogText)) continue;
     if (LOGIN_TEXT_PATTERN.test(dialogText)) continue;
     // 弹窗里本身有签到按钮时不能关，否则把要点的东西关掉了
     if (CHECKIN_PATTERN.test(dialogText)) continue;

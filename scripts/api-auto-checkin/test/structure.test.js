@@ -104,7 +104,12 @@ test('网络 hook 只在已知站点安装且早于 DOM 就绪', () => {
 
 test('人机验证一律停下，不尝试绕过', () => {
   const checkin = readSrc('40-checkin.js');
+  const guards = readSrc('31-guards.js');
   assert.match(checkin, /needsHuman: true/);
+  assert.match(guards, /HUMAN_VERIFICATION_TEXT_SELECTORS/);
+  assert.match(guards, /PASSIVE_VERIFICATION_SELECTOR/);
+  assert.doesNotMatch(guards, /slice\(0, 4000\)/,
+    '不能再对整页前 4000 字做宽泛验证关键词扫描');
 
   const forbidden = /solveCaptcha|bypassTurnstile|cf_clearance\s*=|recaptchaToken\s*=|autoSolve/i;
   for (const name of allSrcNames) {

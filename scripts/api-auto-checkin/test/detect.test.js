@@ -220,6 +220,60 @@ test('识别人机验证的选择器与文字', () => {
   assert.equal(normal.M.hasHumanVerification(), false);
 });
 
+test('普通安全说明文字不触发人机验证', () => {
+  const texts = [
+    '账户安全：建议开启身份验证',
+    '请验证身份后查看敏感信息',
+    '修改邮箱时需要输入验证码',
+    '本站使用 Turnstile 保护注册页面',
+    'reCAPTCHA 仅用于防止滥用'
+  ];
+  for (const text of texts) {
+    const { M } = setup([{ tag: 'p', text }, { tag: 'button', text: '签到' }]);
+    assert.equal(M.hasHumanVerification(), false, `「${text}」不该触发验证提示`);
+  }
+});
+
+test('被动验证码徽章和 invisible widget 不触发人机验证', () => {
+  const badge = setup([{
+    tag: 'div',
+    attrs: { class: 'grecaptcha-badge' },
+    children: [{ tag: 'iframe', attrs: { src: 'https://www.google.com/recaptcha/api2/anchor' } }]
+  }]);
+  assert.equal(badge.M.hasHumanVerification(), false);
+
+  const invisible = setup([
+    { tag: 'div', attrs: { class: 'cf-turnstile', 'data-size': 'invisible' } }
+  ]);
+  assert.equal(invisible.M.hasHumanVerification(), false);
+});
+
+test('明确的验证弹窗仍然触发人机验证', () => {
+  const { M } = setup([{
+    tag: 'div',
+    attrs: { role: 'dialog' },
+    text: '请完成安全验证后继续'
+  }]);
+  assert.equal(M.hasHumanVerification(), true);
+});
+
+test('较长的明确验证弹窗仍然触发人机验证', () => {
+  const { M } = setup([{
+    tag: 'div',
+    attrs: { role: 'dialog' },
+    text: `${'安全提示'.repeat(90)} 请完成人机验证后继续`
+  }]);
+  assert.equal(M.hasHumanVerification(), true);
+});
+
+test('长页面正文里提到验证操作不触发人机验证', () => {
+  const { M } = setup([
+    { tag: 'p', text: `${'帮助说明'.repeat(90)} 遇到登录问题时请完成安全验证后继续` },
+    { tag: 'button', text: '签到' }
+  ]);
+  assert.equal(M.hasHumanVerification(), false);
+});
+
 test('隐藏的验证组件不算', () => {
   const { M } = setup([
     { tag: 'div', attrs: { class: 'cf-turnstile' }, hidden: true }
