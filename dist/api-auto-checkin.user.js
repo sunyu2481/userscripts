@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         签到助手
 // @namespace    https://github.com/sunyu2481/userscripts
-// @version      3.0.6
+// @version      3.0.7
 // @description  在页面上找到签到按钮并点击，一次点击依次处理多个站点。不调用任何接口，只代替你点按钮。
 // @author       sunyu2481
 // @match        https://*/*
@@ -1514,7 +1514,8 @@ let coordinatorAborted = false;
 let activeCoordinatorRunId = null;
 let cancelCoordinatorWait = null;
 
-const RUN_STATE_TTL_MS = 15 * 60 * 1000;
+const RUN_STATE_TTL_MS = 150000;   // 协调者有 5 秒心跳，正常运行时 updatedAt 一直新，仅协调者页面消失才会过期
+const RUN_HEARTBEAT_MS = 5000;
 
 function createRunId(now = Date.now()) {
   return `${now.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -1544,6 +1545,40 @@ function saveActiveRunState(runId, startedAt, patch = {}) {
     updatedAt: new Date().toISOString(),
     ...patch
   });
+}
+
+// 心跳：运行期间周期刷新 updatedAt，让其它页面据此判断协调者是否还活着
+function heartbeatRunState(runId) {
+  const state = getRunState();
+  if (state.running === true && state.runId === runId) {
+    saveRunState({ ...state, updatedAt: new Date().toISOString() });
+  }
+}
+
+// 强制清除运行态：协调者页面已消失、无人收尾时，任何页面都能调用来自救
+function forceStopRunState() {
+  const state = getRunState();
+  saveRunState({
+    ...state,
+    running: false,
+    aborted: true,
+    abortRequestedAt: state.abortRequestedAt || Date.now(),
+    finishedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  clearJob();
+  const results = getResults();
+  for (const [siteId, result] of Object.entries(results)) {
+    if (result?.status === 'checking') {
+      results[siteId] = { ...result, status: 'failed', message: '已强制结束' };
+    }
+  }
+  saveResults(results);
+  if (activeCoordinatorRunId) {
+    coordinatorAborted = true;
+    cancelCoordinatorWait?.();
+  }
+  renderPanel();
 }
 
 // 本轮开过的标签页。GM_openInTab 返回的句柄是活对象，
@@ -1596,7 +1631,8 @@ function pickGap(settings = {}) {
 
 // 任务有效期：协调者派出任务后，新标签页应当在这段时间内加载并认领。
 // 超出就不认，避免陈旧任务被无关的页面导航捡走。
-const JOB_CLAIM_WINDOW_MS = 30000;
+const JOB_CLAIM_WINDOW_MS = 40000;
+const CLAIM_HEARTBEAT_TIMEOUT_MS = 45000;   // 略大于认领窗口，给"标签加载→认领→写 checking"留余量
 
 function isJobFresh(job, host, now = Date.now()) {
   if (!job?.site?.domain) return false;
@@ -1609,12 +1645,14 @@ function isJobFresh(job, host, now = Date.now()) {
 }
 
 // 等某个站点的结果写入，或超时
-function waitForSiteResult(siteId, timeoutMs, runId = null) {
+function waitForSiteResult(siteId, timeoutMs, runId = null, claimTimeoutMs = CLAIM_HEARTBEAT_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     let listenerId = null;
     let runListenerId = null;
     let timer = null;
+    let claimTimer = null;
     let settled = false;
+    let sawWorker = false;
 
     function cleanup() {
       if (listenerId !== null) {
@@ -1626,6 +1664,7 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
         runListenerId = null;
       }
       if (timer) clearTimeout(timer);
+      if (claimTimer) clearTimeout(claimTimer);
       if (cancelCoordinatorWait === cancel) cancelCoordinatorWait = null;
     }
 
@@ -1654,9 +1693,12 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
 
     // 先查一次，避免结果早于监听写入
     const existing = getResults()[siteId];
-    if (existing && existing.status !== 'checking') {
-      finish(existing);
-      return;
+    if (existing) {
+      sawWorker = true;
+      if (existing.status !== 'checking') {
+        finish(existing);
+        return;
+      }
     }
 
     try {
@@ -1669,7 +1711,10 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
           return;
         }
         const result = parsed?.[siteId];
-        if (result && result.status !== 'checking') finish(result);
+        if (result) {
+          sawWorker = true;
+          if (result.status !== 'checking') finish(result);
+        }
       });
 
       if (runId) {
@@ -1690,6 +1735,10 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
       timer = setTimeout(() => {
         finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
       }, timeoutMs);
+      // 没等到 worker 写入任何结果（含 checking）就提前放弃，不干等满主超时
+      claimTimer = setTimeout(() => {
+        if (!sawWorker) finish({ status: 'failed', message: '标签页未在时限内认领任务，可能被浏览器后台限制' });
+      }, claimTimeoutMs);
     } catch (error) {
       fail(error);
     }
@@ -1726,6 +1775,7 @@ async function runBatchCheckIn(siteIds = null) {
   const startedAt = new Date().toISOString();
   activeCoordinatorRunId = runId;
   const collected = {};
+  let heartbeatTimer = null;
 
   try {
     // 多个页面可能在同一瞬间都读到“空闲”。先各自写入 runId，短暂让出事件循环，
@@ -1748,6 +1798,9 @@ async function runBatchCheckIn(siteIds = null) {
     }
 
     renderPanel();
+
+    // 进入站点循环前启动心跳：运行期间周期刷新 updatedAt，标记协调者仍存活
+    heartbeatTimer = setInterval(() => heartbeatRunState(runId), RUN_HEARTBEAT_MS);
 
     for (let index = 0; index < targets.length; index++) {
       if (coordinatorAborted || isRunAbortRequested(runId)) {
@@ -1805,6 +1858,7 @@ async function runBatchCheckIn(siteIds = null) {
       }
     }
   } finally {
+    clearInterval(heartbeatTimer);
     cancelCoordinatorWait = null;
     activeCoordinatorRunId = null;
     const state = getRunState();
@@ -2133,7 +2187,7 @@ function renderPanel() {
   const sites = getSites();
   const results = getResults();
   const runState = getRunState();
-  const running = runState.running === true;
+  const running = runState.running === true && isRunStateFresh(runState);
   const aborting = running && Boolean(runState.abortRequestedAt);
   const enabledCount = sites.filter(s => s.enabled).length;
 
@@ -2153,9 +2207,9 @@ function renderPanel() {
         ${running ? '签到中...' : '开始签到'}
       </button>
       ${running
-        ? `<button class="gm-btn danger" data-act="abort" ${aborting ? 'disabled' : ''}>${
-          aborting ? '终止中...' : '终止'
-        }</button>`
+        ? (aborting
+            ? `<button class="gm-btn danger" data-act="force-stop">强制结束</button>`
+            : `<button class="gm-btn danger" data-act="abort">终止</button>`)
         : ''}
       ${!running && openedTabCount > 0
         ? `<button class="gm-btn" data-act="close-tabs">关闭 ${openedTabCount} 个标签页</button>`
@@ -2260,12 +2314,28 @@ function escapeHtml(text) {
 // 源文件: 72-ui-events.js
 // ==================================================================
 // ===== 面板事件 =====
+let panelRefreshTimer = null;
+
 function bindPanelEvents(panel, body) {
+  // 惰性创建面板重绘定时器：运行期间每 2s 刷新进度，TTL 过期后自动解锁按钮。
+  // 只创建一次；空闲时不重绘，避免清空正在输入的“添加站点”输入框。
+  if (panelRefreshTimer === null) {
+    panelRefreshTimer = setInterval(() => {
+      if (!panelVisible) return;
+      if (getRunState().running === true) renderPanel();
+    }, 2000);
+  }
+
   body.querySelector('[data-act="start"]')?.addEventListener('click', () => {
     runBatchCheckIn().catch(error => showToast(`出错了: ${error.message}`));
   });
 
   body.querySelector('[data-act="abort"]')?.addEventListener('click', abortBatchCheckIn);
+
+  body.querySelector('[data-act="force-stop"]')?.addEventListener('click', () => {
+    forceStopRunState();
+    showToast('已强制结束');
+  });
 
   function submitNewSite() {
     handleAddSite(

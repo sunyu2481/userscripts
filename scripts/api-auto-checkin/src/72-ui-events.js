@@ -1,10 +1,26 @@
 // ===== 面板事件 =====
+let panelRefreshTimer = null;
+
 function bindPanelEvents(panel, body) {
+  // 惰性创建面板重绘定时器：运行期间每 2s 刷新进度，TTL 过期后自动解锁按钮。
+  // 只创建一次；空闲时不重绘，避免清空正在输入的“添加站点”输入框。
+  if (panelRefreshTimer === null) {
+    panelRefreshTimer = setInterval(() => {
+      if (!panelVisible) return;
+      if (getRunState().running === true) renderPanel();
+    }, 2000);
+  }
+
   body.querySelector('[data-act="start"]')?.addEventListener('click', () => {
     runBatchCheckIn().catch(error => showToast(`出错了: ${error.message}`));
   });
 
   body.querySelector('[data-act="abort"]')?.addEventListener('click', abortBatchCheckIn);
+
+  body.querySelector('[data-act="force-stop"]')?.addEventListener('click', () => {
+    forceStopRunState();
+    showToast('已强制结束');
+  });
 
   function submitNewSite() {
     handleAddSite(
