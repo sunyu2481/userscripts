@@ -73,8 +73,9 @@ async function main() {
     return;
   }
 
-  // 没被派活：批量进行中时显示面板跟进度
-  if (getRunState().running === true) {
+  // 没被派活：批量进行中时显示面板跟进度。
+  // 用 isRunStateFresh 而非裸 running：陈旧的运行态不值得为它弹面板。
+  if (isRunStateFresh(getRunState())) {
     togglePanel(true);
     watchSharedState();
   }
@@ -87,7 +88,11 @@ function watchSharedState() {
       if (remote && panelVisible) renderPanel();
     });
     GM_addValueChangeListener(KEY_RUN, (name, oldValue, newValue, remote) => {
-      if (remote && panelVisible) renderPanel();
+      if (!remote || !panelVisible) return;
+      // 协调者每 5 秒心跳一次，只动 updatedAt。那种写入没有可见变化，
+      // 重绘它等于每 5 秒清空一次用户正在输入的“添加站点”输入框。
+      if (isHeartbeatOnlyChange(oldValue, newValue)) return;
+      renderPanel();
     });
   } catch (e) { /* 不支持就靠手动刷新 */ }
 }

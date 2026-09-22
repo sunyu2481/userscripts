@@ -1,13 +1,32 @@
 // ===== 面板事件 =====
 let panelRefreshTimer = null;
+let stalePanelPainted = false;
 
 function bindPanelEvents(panel, body) {
-  // 惰性创建面板重绘定时器：运行期间每 2s 刷新进度，TTL 过期后自动解锁按钮。
+  // 惰性创建面板重绘定时器：运行期间每 2s 刷新进度。
   // 只创建一次；空闲时不重绘，避免清空正在输入的“添加站点”输入框。
   if (panelRefreshTimer === null) {
     panelRefreshTimer = setInterval(() => {
       if (!panelVisible) return;
-      if (getRunState().running === true) renderPanel();
+      const state = getRunState();
+      if (state.running !== true) {
+        stalePanelPainted = false;
+        return;
+      }
+      if (isRunStateFresh(state)) {
+        stalePanelPainted = false;
+        renderPanel();
+        return;
+      }
+      // running 还挂着但心跳停了。本页无从区分"协调者页面已关"和"协调者只是被
+      // 浏览器冻结"，所以绝不碰共享状态——那会终止另一个页面正跑着的一轮。
+      // 只重绘一次：renderPanel 按过期算出 running=false，开始按钮就此解锁，
+      // 用户可以直接开新一轮（掉队的旧协调者由 ownsRun 自己收手）。
+      // 之后停手不再重绘，否则每 2s 清空一次正在输入的“添加站点”输入框。
+      if (!stalePanelPainted) {
+        stalePanelPainted = true;
+        renderPanel();
+      }
     }, 2000);
   }
 
@@ -17,9 +36,12 @@ function bindPanelEvents(panel, body) {
 
   body.querySelector('[data-act="abort"]')?.addEventListener('click', abortBatchCheckIn);
 
-  body.querySelector('[data-act="force-stop"]')?.addEventListener('click', () => {
-    forceStopRunState();
-    showToast('已强制结束');
+  const forceStopBtn = body.querySelector('[data-act="force-stop"]');
+  forceStopBtn?.addEventListener('click', () => {
+    // 只清渲染这个按钮时看到的那一轮，别误杀期间新起的运行态
+    const cleared = forceStopRunState(forceStopBtn.dataset.runId || null);
+    showToast(cleared ? '已强制结束' : '这一轮已经结束了');
+    renderPanel();
   });
 
   function submitNewSite() {

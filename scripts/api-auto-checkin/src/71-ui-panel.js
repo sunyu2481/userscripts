@@ -101,7 +101,8 @@ function renderPanel() {
       </button>
       ${running
         ? (aborting
-            ? `<button class="gm-btn danger" data-act="force-stop">强制结束</button>`
+            ? `<button class="gm-btn danger" data-act="force-stop"
+                       data-run="${escapeHtml(runState.runId || '')}">强制结束</button>`
             : `<button class="gm-btn danger" data-act="abort">终止</button>`)
         : ''}
       ${!running && openedTabCount > 0

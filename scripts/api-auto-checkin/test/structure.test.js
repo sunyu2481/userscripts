@@ -222,6 +222,15 @@ test('任务认领靠时间窗口且只认领一次', () => {
   assert.match(main, /isJobFresh\(job, host\)/);
   // 认领后立刻打标记，避免同域两个页面同时执行
   assert.match(main, /saveJob\(\{ \.\.\.job, claimedAt: Date\.now\(\) \}\)/);
+
+  // 派发时必须写入 claimBy，窗口跟着用户配置的站点超时走。
+  // 漏写就退回固定 40s：超时设 5s 的人会在之后几十秒里
+  // 被任意一次同域导航把残留任务捡走，悄悄多签一次。
+  assert.match(coordinator, /function pickClaimDeadline/);
+  assert.match(coordinator, /claimBy: pickClaimDeadline\(settings\.siteTimeoutMs, assignedAt\)/,
+    '派发任务时必须写入 claimBy');
+  assert.match(coordinator, /const claimBy = Number\(job\.claimBy \|\| 0\)/,
+    'isJobFresh 必须优先读任务自带的截止时间');
 });
 
 test('hash 路由页面会被纠正到目标路由', () => {
@@ -250,6 +259,25 @@ test('批量开始时清空余额，单站点重试只清自己', () => {
   const body = coordinator.slice(coordinator.indexOf('async function runBatchCheckIn'));
   assert.match(body, /for \(const siteId of siteIds\) delete kept\[siteId\]/);
   assert.match(body, /saveResults\(\{\}\)/);
+});
+
+test('面板定时器不因运行态过期就清共享状态', () => {
+  const events = readSrc('72-ui-events.js');
+  const timer = events.slice(events.indexOf('panelRefreshTimer = setInterval'),
+                             events.indexOf('data-act="start"'));
+
+  // 旁观页面分不清"协调者页面已关"和"协调者只是被浏览器冻结"。
+  // 定时器里动共享状态会终止另一个页面正跑着的那一轮。
+  assert.doesNotMatch(timer, /forceStopRunState|saveRunState|saveResults|clearJob|abortBatchCheckIn/,
+    '面板定时器不该写共享状态，过期只解锁本页按钮');
+  // 过期时只重绘一次，否则每 2s 清空一次正在输入的框
+  assert.match(timer, /stalePanelPainted/);
+
+  // 强制结束只能由用户点击触发，且必须带上 runId 闸门
+  const coordinator = readSrc('60-coordinator.js');
+  assert.match(coordinator, /function forceStopRunState\(expectedRunId/);
+  assert.match(coordinator, /if \(expectedRunId && state\.runId !== expectedRunId\) return false/);
+  assert.match(events, /forceStopRunState\(forceStopBtn\.dataset\.runId/);
 });
 
 test('默认保留标签页，可一键关闭', () => {

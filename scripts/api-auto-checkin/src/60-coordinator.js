@@ -5,7 +5,9 @@ let coordinatorAborted = false;
 let activeCoordinatorRunId = null;
 let cancelCoordinatorWait = null;
 
-const RUN_STATE_TTL_MS = 150000;   // 协调者有 5 秒心跳，正常运行时 updatedAt 一直新，仅协调者页面消失才会过期
+// 协调者每 5 秒刷新一次 updatedAt。后台标签页的定时器会被浏览器降频到大约每分钟一次，
+// TTL 留到 5 分钟，够扛几次漏拍，又不像早先的 15 分钟那样让人干等。
+const RUN_STATE_TTL_MS = 300000;
 const RUN_HEARTBEAT_MS = 5000;
 
 function createRunId(now = Date.now()) {
@@ -29,10 +31,15 @@ function ownsRun(runId, state = getRunState()) {
 }
 
 function saveActiveRunState(runId, startedAt, patch = {}) {
+  const state = getRunState();
+  // 别抹掉别人刚写下的终止请求：进度推进和「终止」按钮可能落在同一瞬间，
+  // 整对象覆盖会把 abortRequestedAt 丢掉，那一轮就再也停不下来了。
+  const abortRequestedAt = state.runId === runId ? state.abortRequestedAt : undefined;
   saveRunState({
     running: true,
     runId,
     startedAt,
+    ...(abortRequestedAt ? { abortRequestedAt } : {}),
     updatedAt: new Date().toISOString(),
     ...patch
   });
@@ -46,9 +53,34 @@ function heartbeatRunState(runId) {
   }
 }
 
-// 强制清除运行态：协调者页面已消失、无人收尾时，任何页面都能调用来自救
-function forceStopRunState() {
+// 这次运行态写入是否只有心跳时间戳变了。
+// 心跳每 5 秒一次且面板上看不出区别，旁观页面重绘它只会打断用户输入。
+function isHeartbeatOnlyChange(oldValue, newValue) {
+  try {
+    const before = typeof oldValue === 'string' ? JSON.parse(oldValue) : oldValue;
+    const after = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
+    if (!isRecord(before) || !isRecord(after)) return false;
+    // updatedAt 之外的字段全都没动，才算纯心跳
+    const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+    keys.delete('updatedAt');
+    for (const key of keys) {
+      if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) return false;
+    }
+    return true;
+  } catch (e) {
+    return false;   // 解析不了就当有变化，照旧重绘
+  }
+}
+
+// 强制清除运行态：协调者页面已消失、无人收尾时，用户点一下来自救。
+// expectedRunId 是防误杀的闸门：面板渲染时看到的那一轮才允许清。
+// 点按钮到落地之间若已有新一轮起来（runId 变了），直接放手，
+// 否则会把别人刚写入的运行态改成 aborted，新一轮启动即死。
+function forceStopRunState(expectedRunId = null) {
   const state = getRunState();
+  if (state.running !== true) return false;
+  if (expectedRunId && state.runId !== expectedRunId) return false;
+
   saveRunState({
     ...state,
     running: false,
@@ -70,6 +102,7 @@ function forceStopRunState() {
     cancelCoordinatorWait?.();
   }
   renderPanel();
+  return true;
 }
 
 // 本轮开过的标签页。GM_openInTab 返回的句柄是活对象，
@@ -125,18 +158,41 @@ function pickGap(settings = {}) {
 const JOB_CLAIM_WINDOW_MS = 40000;
 const CLAIM_HEARTBEAT_TIMEOUT_MS = 45000;   // 略大于认领窗口，给"标签加载→认领→写 checking"留余量
 
+// 认领超时必须严格小于主超时，否则提前放弃毫无意义：两个 setTimeout 延迟相同时
+// 按注册顺序执行，主超时先注册就先 settle，认领分支永远轮不到。
+// 只让开一步，不折半——折半会在 60s 这类设置下提前放弃仍在正常加载的标签页。
+function pickClaimTimeout(timeoutMs) {
+  const main = Number(timeoutMs);
+  if (!Number.isFinite(main) || main <= 0) return CLAIM_HEARTBEAT_TIMEOUT_MS;
+  return Math.min(CLAIM_HEARTBEAT_TIMEOUT_MS, Math.max(1000, main - 1000));
+}
+
+// 派发任务时算出截止时间。协调者正常收尾会 clearJob，这个值只在协调者
+// 中途死掉、任务残留时才真正起作用：那时窗口不该超过用户配置的站点超时，
+// 否则超时设 5s 的人会在之后 40s 里被任意一次同域导航悄悄签掉一次。
+function pickClaimDeadline(timeoutMs, now = Date.now()) {
+  const main = Number(timeoutMs);
+  const window = Number.isFinite(main) && main > 0
+    ? Math.min(JOB_CLAIM_WINDOW_MS, main)
+    : JOB_CLAIM_WINDOW_MS;
+  return now + window;
+}
+
 function isJobFresh(job, host, now = Date.now()) {
   if (!job?.site?.domain) return false;
   if (job.site.domain !== host) return false;
   if (job.claimedAt) return false;   // 已经被认领过，不再重复
   const assignedAt = Number(job.assignedAt || 0);
   if (!assignedAt) return false;
-  const age = now - assignedAt;
-  return age >= 0 && age <= JOB_CLAIM_WINDOW_MS;
+  if (now < assignedAt) return false;   // 时钟倒退，不认
+  // claimBy 由派发方写入，跟着站点超时走；旧任务没这个字段时退回固定窗口
+  const claimBy = Number(job.claimBy || 0);
+  if (claimBy) return now <= claimBy;
+  return now - assignedAt <= JOB_CLAIM_WINDOW_MS;
 }
 
 // 等某个站点的结果写入，或超时
-function waitForSiteResult(siteId, timeoutMs, runId = null, claimTimeoutMs = CLAIM_HEARTBEAT_TIMEOUT_MS) {
+function waitForSiteResult(siteId, timeoutMs, runId = null) {
   return new Promise((resolve, reject) => {
     let listenerId = null;
     let runListenerId = null;
@@ -229,7 +285,7 @@ function waitForSiteResult(siteId, timeoutMs, runId = null, claimTimeoutMs = CLA
       // 没等到 worker 写入任何结果（含 checking）就提前放弃，不干等满主超时
       claimTimer = setTimeout(() => {
         if (!sawWorker) finish({ status: 'failed', message: '标签页未在时限内认领任务，可能被浏览器后台限制' });
-      }, claimTimeoutMs);
+      }, pickClaimTimeout(timeoutMs));
     } catch (error) {
       fail(error);
     }
@@ -267,6 +323,7 @@ async function runBatchCheckIn(siteIds = null) {
   activeCoordinatorRunId = runId;
   const collected = {};
   let heartbeatTimer = null;
+  let lostOwnership = false;
 
   try {
     // 多个页面可能在同一瞬间都读到“空闲”。先各自写入 runId，短暂让出事件循环，
@@ -283,6 +340,13 @@ async function runBatchCheckIn(siteIds = null) {
     if (siteIds) {
       const kept = getResults();
       for (const siteId of siteIds) delete kept[siteId];
+      // 上一轮中断时留下的 checking 没人收尾，会一直显示“签到中”。
+      // 本轮不重试它们，就地落为失败，别让面板挂着假进度。
+      for (const [siteId, result] of Object.entries(kept)) {
+        if (result?.status === 'checking') {
+          kept[siteId] = { ...result, status: 'failed', message: '上一轮未完成' };
+        }
+      }
       saveResults(kept);
     } else {
       saveResults({});
@@ -298,6 +362,13 @@ async function runBatchCheckIn(siteIds = null) {
         coordinatorAborted = true;
         break;
       }
+      // 运行态已经不是自己的了：本页面曾被浏览器冻结、心跳断过，别的页面按过期
+      // 重新起了一轮。这里必须收手——否则下面的 saveActiveRunState / saveJob 会把
+      // 新协调者的任务覆盖掉，两边交替抢 job，worker 会认领到错站点。
+      if (!ownsRun(runId)) {
+        lostOwnership = true;
+        break;
+      }
 
       const site = targets[index];
       saveActiveRunState(runId, startedAt, {
@@ -309,7 +380,12 @@ async function runBatchCheckIn(siteIds = null) {
       // 之后发生导航，也不会认领到这个任务、重复签到。
       // 不往 URL 上加任何标记：站点可能用 hash 路由（如 /#/checkin），
       // 动了 URL 就会把路由改坏。
-      saveJob({ site, assignedAt: Date.now() });
+      const assignedAt = Date.now();
+      saveJob({
+        site,
+        assignedAt,
+        claimBy: pickClaimDeadline(settings.siteTimeoutMs, assignedAt)
+      });
       renderPanel();
 
       let handle = null;
@@ -366,6 +442,13 @@ async function runBatchCheckIn(siteIds = null) {
     renderPanel();
   }
 
+  // 掉队的一轮不算完成：别写“上次签到时间”，也别用只跑了一半的结果做汇总，
+  // 那会盖掉接管方正在写的进度。
+  if (lostOwnership) {
+    showToast('本页已掉队，签到已由另一个页面接管');
+    return;
+  }
+
   if (coordinatorAborted) {
     showToast('已终止');
     return;
@@ -381,7 +464,9 @@ async function runBatchCheckIn(siteIds = null) {
 
 function abortBatchCheckIn() {
   const state = getRunState();
-  if (state.running !== true) {
+  // 判活标准跟面板一致：过期的运行态按"没有任务"处理，
+  // 否则这里会给一个早已消失的协调者发终止请求，用户看着"正在终止"永远不动。
+  if (!isRunStateFresh(state)) {
     showToast('当前没有运行中的任务');
     return false;
   }
