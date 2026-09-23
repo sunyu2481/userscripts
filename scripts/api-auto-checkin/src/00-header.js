@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         签到助手
 // @namespace    https://github.com/sunyu2481/userscripts
-// @version      3.0.10
+// @version      3.0.11
 // @description  在页面上找到签到按钮并点击，一次点击依次处理多个站点。不调用任何接口，只代替你点按钮。
 // @author       sunyu2481
 // @match        https://*/*

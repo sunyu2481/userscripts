@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         签到助手
 // @namespace    https://github.com/sunyu2481/userscripts
-// @version      3.0.10
+// @version      3.0.11
 // @description  在页面上找到签到按钮并点击，一次点击依次处理多个站点。不调用任何接口，只代替你点按钮。
 // @author       sunyu2481
 // @match        https://*/*
 // @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_getTab
+// @grant        GM_saveTab
 // @grant        GM_addValueChangeListener
 // @grant        GM_removeValueChangeListener
 // @grant        GM_openInTab
@@ -943,15 +945,24 @@ function takeCapturedResult(site) {
 }
 
 // 在页面上执行一次签到
-async function checkInOnThisPage(site) {
+async function checkInOnThisPage(site, options = {}) {
+  const isActive = options.isActive || (() => true);
   await waitForDomReady();
+  if (!isActive()) return null;
+
+  // 已点过按钮的任务在跳转后只读结果，不能再点一次（例如转盘会消耗次数）。
+  if (options.previousClick) {
+    return waitForCheckInOutcome(options.previousClick.clickedText, site, options.previousClick, isActive);
+  }
 
   // hash 路由的 SPA 有时会忽略初始 hash 直接落在首页，
   // 或者被登录流程重定向后丢掉 hash。这里纠正一次。
   await ensureHashRoute(site);
+  if (!isActive()) return null;
 
   // 给 SPA 一点渲染时间
   await sleep(1200);
+  if (!isActive()) return null;
 
   if (looksLikeInvalidPage()) {
     return { status: 'invalid', message: '页面不存在或站点已失效' };
@@ -980,8 +991,15 @@ async function checkInOnThisPage(site) {
   let hashFixes = 0;
 
   while (Date.now() < deadline) {
+    if (!isActive()) return null;
     if (hasHumanVerification()) {
       return { status: 'failed', message: '站点要求人机验证，请手动完成', needsHuman: true };
+    }
+
+    if (options.resumed) {
+      // 你可能已在登录返回后手动签完，先读明确反馈再决定是否点击。
+      const result = takeCapturedResult(site) || readVerdictFromToast(site);
+      if (result) return result;
     }
 
     button = findCheckInButton(site.buttonWords);
@@ -1020,6 +1038,7 @@ async function checkInOnThisPage(site) {
     await sleep(POLL_MS);
   }
 
+  if (!isActive()) return null;
   if (!button) {
     // 最后再确认一次是否其实已经签过
     const already = findInitialAlreadyCheckedIn(site.buttonWords);
@@ -1051,15 +1070,14 @@ async function checkInOnThisPage(site) {
   const clickedText = button.text;
   const initialAlreadyTexts = listAlreadyCheckedInTexts();
   const initialToastTexts = listVisibleToastTexts();
+  const baseline = { initialAlreadyTexts, initialToastTexts };
+  if (!isActive() || options.beforeClick?.({ clickedText, ...baseline }) === false) return null;
   const clicked = clickElement(button.el);
   if (!clicked) {
     return { status: 'failed', message: `点击「${clickedText}」失败` };
   }
 
-  return waitForCheckInOutcome(clickedText, site, {
-    initialAlreadyTexts,
-    initialToastTexts
-  });
+  return waitForCheckInOutcome(clickedText, site, baseline, isActive);
 }
 
 // 真实点击：先滚动到可见位置，再派发完整的鼠标事件序列。
@@ -1104,11 +1122,14 @@ function dispatchQuietly(el, ctorName, type, init) {
 }
 
 // 点完之后看页面怎么反应
-async function waitForCheckInOutcome(clickedText, site = null, baseline = {}) {
+async function waitForCheckInOutcome(clickedText, site = null, baseline = {}, isActive = () => true) {
   const deadline = Date.now() + WAIT_RESULT_TIMEOUT_MS;
+  let sawLoginHint = false;
 
   while (Date.now() < deadline) {
+    if (!isActive()) return null;
     await sleep(POLL_MS);
+    if (!isActive()) return null;
 
     // 页面自己发的请求最可信
     const fromResponse = takeCapturedResult(site);
@@ -1135,6 +1156,15 @@ async function waitForCheckInOutcome(clickedText, site = null, baseline = {}) {
         needsHuman: true,
         clickedText
       };
+    }
+
+    if (looksLoggedOut()) {
+      if (sawLoginHint) {
+        return { status: 'failed', message: '需要先登录这个站点', needsLogin: true, clickedText };
+      }
+      sawLoginHint = true;
+    } else {
+      sawLoginHint = false;
     }
   }
 
@@ -1383,12 +1413,62 @@ function readVerdictFromToast(site = null, ignoredTexts = []) {
 // 源文件: 50-worker.js
 // ==================================================================
 // ===== 工作者：在被打开的站点页面上跑一次签到 =====
+// 油猴的标签页数据能跨刷新和登录跳转保留，也不会被其它同域标签页继承。
+function readWorkerTab() {
+  return new Promise(resolve => {
+    try {
+      GM_getTab(tab => resolve(isRecord(tab) ? tab : {}));
+    } catch (e) {
+      resolve(null);   // 不支持标签页存储时仍能执行本页任务，手动继续作为兜底
+    }
+  });
+}
+
+function isWorkerJobActive(job, now = Date.now()) {
+  return isCurrentJob(job) && now >= job.assignedAt && now < job.expiresAt;
+}
+
+async function claimWorkerJob(host) {
+  const tab = await readWorkerTab();
+  // 读取标签页数据期间任务可能已经改变，必须重新取共享任务。
+  const job = getJob();
+  if (job?.site?.domain !== host || !isWorkerJobActive(job)) return null;
+
+  if (job.claimedAt) {
+    return isSameJob(job, tab?.checkInJob) ? { ...job, resumed: true } : null;
+  }
+  if (!isJobFresh(job, host)) return null;
+
+  if (tab) {
+    try {
+      GM_saveTab({
+        ...tab,
+        checkInJob: { runId: job.runId, assignedAt: job.assignedAt, site: { siteId: job.site.siteId } }
+      });
+    } catch (e) { /* 本页仍可继续，只是不支持跳转后接续 */ }
+  }
+  const claimed = { ...job, claimedAt: Date.now() };
+  saveJob(claimed);
+  return claimed;
+}
+
 async function runWorker(job) {
   const site = job.site;
-  reportResult(site.siteId, { status: 'checking', message: '签到中', siteName: site.siteName });
+  if (!reportResult(site.siteId, { status: 'checking', message: '签到中', siteName: site.siteName }, job)) return;
 
   try {
-    const result = await checkInOnThisPage(site);
+    const result = await checkInOnThisPage(site, {
+      isActive: () => isWorkerJobActive(job),
+      resumed: job.resumed === true,
+      previousClick: job.click,
+      beforeClick: click => {
+        if (!isWorkerJobActive(job)) return false;
+        // 点击前持久化，页面马上跳转时也不会在新页面重复点击。
+        saveJob({ ...getJob(), click });
+        return true;
+      }
+    });
+    if (!result || !isWorkerJobActive(job)) return;
 
     // 站点名没被手动改过时，顺手从页面学一个
     const raw = getRawSites().find(s => s.domain === site.domain);
@@ -1401,7 +1481,7 @@ async function runWorker(job) {
     }
     result.siteName = result.siteName || site.siteName;
 
-    reportResult(site.siteId, result);
+    if (!reportResult(site.siteId, result, job)) return;
 
     // 需要你亲自处理时，这个标签页会被保留下来。
     // 在页面上直接说明要做什么，并等你从面板点"切过来"。
@@ -1413,7 +1493,7 @@ async function runWorker(job) {
       status: 'failed',
       message: error?.message || '签到过程出错',
       siteName: site.siteName
-    });
+    }, job);
   }
 }
 
@@ -1425,10 +1505,12 @@ function showWorkerNotice(result) {
   showStickyNotice(text);
 }
 
-function reportResult(siteId, result) {
+function reportResult(siteId, result, job) {
+  if (!isWorkerJobActive(job)) return false;
   const results = getResults();
-  results[siteId] = { ...result, at: Date.now() };
+  results[siteId] = { ...result, runId: job.runId, assignedAt: job.assignedAt, at: Date.now() };
   saveResults(results);
+  return true;
 }
 
 // ==================================================================
@@ -1650,7 +1732,7 @@ function closeAllOpenedTabs() {
 
 // 需要你亲自处理的标签页不该被自动关掉
 function shouldKeepTabOpen(result) {
-  return result?.needsHuman === true || result?.needsLogin === true;
+  return result?.needsHuman === true || result?.needsLogin === true || result?.skipped === true;
 }
 
 function pickGap(settings = {}) {
@@ -1700,6 +1782,44 @@ function isJobFresh(job, host, now = Date.now()) {
   return now - assignedAt <= JOB_CLAIM_WINDOW_MS;
 }
 
+function isSameJob(left, right) {
+  return Boolean(left?.runId && left.runId === right?.runId &&
+    left.assignedAt === right.assignedAt && left.site?.siteId &&
+    left.site.siteId === right.site?.siteId);
+}
+
+// 只有当前仍在等待的任务能点击或回写。手动完成后即使旧页面还活着，也要收手。
+function isCurrentJob(job) {
+  const state = getRunState();
+  if (!isSameJob(job, getJob()) || !ownsRun(job.runId, state) ||
+      state.currentSiteId !== job.site.siteId || isRunAbortRequested(job.runId, state)) return false;
+  const result = getResults()[job.site.siteId];
+  return !result || result.status === 'checking';
+}
+
+function finishCurrentSite(runId, siteId, status) {
+  if (status !== 'success' && status !== 'unknown') return false;
+  const job = getJob();
+  // 按钮绑定渲染时的运行和站点，旧面板上的点击不能处理下一站或新一轮。
+  if (!runId || job?.runId !== runId || job.site?.siteId !== siteId || !isCurrentJob(job)) return false;
+  const skipped = status === 'unknown';
+  saveResults({
+    ...getResults(),
+    [siteId]: {
+      status,
+      message: skipped ? '已跳过，未确认签到结果' : '已手动完成签到',
+      manual: true,
+      skipped,
+      siteName: job.site.siteName,
+      runId,
+      assignedAt: job.assignedAt,
+      at: Date.now()
+    }
+  });
+  renderPanel();
+  return true;
+}
+
 // 等某个站点的结果写入，或超时
 function waitForSiteResult(siteId, timeoutMs, runId = null) {
   return new Promise((resolve, reject) => {
@@ -1707,6 +1827,7 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
     let runListenerId = null;
     let timer = null;
     let claimTimer = null;
+    let pollTimer = null;
     let settled = false;
     let sawWorker = false;
 
@@ -1719,8 +1840,9 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
         try { GM_removeValueChangeListener(runListenerId); } catch (e) { /* 已移除 */ }
         runListenerId = null;
       }
-      if (timer) clearTimeout(timer);
-      if (claimTimer) clearTimeout(claimTimer);
+      if (timer !== null) clearTimeout(timer);
+      if (claimTimer !== null) clearTimeout(claimTimer);
+      if (pollTimer !== null) clearInterval(pollTimer);
       if (cancelCoordinatorWait === cancel) cancelCoordinatorWait = null;
     }
 
@@ -1742,35 +1864,40 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
       finish({ status: 'failed', message: '已中断', aborted: true });
     }
 
-    if (runId && isRunAbortRequested(runId)) {
+    function acceptResult(result) {
+      if (!result || (runId && result.runId !== runId)) return;
+      sawWorker = true;
+      if (result.status !== 'checking') finish(result);
+    }
+
+    function checkStoredResult() {
+      if (runId && (!ownsRun(runId) || isRunAbortRequested(runId))) {
+        cancel();
+        return;
+      }
+      acceptResult(getResults()[siteId]);
+    }
+
+    if (runId && (!ownsRun(runId) || isRunAbortRequested(runId))) {
       cancel();
       return;
     }
 
     // 先查一次，避免结果早于监听写入
     const existing = getResults()[siteId];
-    if (existing) {
-      sawWorker = true;
-      if (existing.status !== 'checking') {
-        finish(existing);
-        return;
-      }
-    }
+    acceptResult(existing);
+    if (settled) return;
 
     try {
-      listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue, remote) => {
-        if (!remote) return;
+      listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue) => {
         let parsed = null;
         try {
           parsed = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
         } catch (e) {
           return;
         }
-        const result = parsed?.[siteId];
-        if (result) {
-          sawWorker = true;
-          if (result.status !== 'checking') finish(result);
-        }
+        // 本地的手动完成与远程 worker 的结果都必须能解除等待。
+        acceptResult(parsed?.[siteId]);
       });
 
       if (runId) {
@@ -1781,18 +1908,22 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
           } catch (e) {
             return;
           }
-          if (isRunAbortRequested(runId, state)) cancel();
+          if (!ownsRun(runId, state) || isRunAbortRequested(runId, state)) cancel();
         });
         cancelCoordinatorWait = cancel;
-        if (isRunAbortRequested(runId)) cancel();
       }
 
+      // 补上读取与注册监听之间的窗口；轮询兜住油猴漏发的变更通知。
+      checkStoredResult();
       if (settled) return;
+      pollTimer = setInterval(checkStoredResult, 1000);
       timer = setTimeout(() => {
+        checkStoredResult();
         finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
       }, timeoutMs);
       // 没等到 worker 写入任何结果（含 checking）就提前放弃，不干等满主超时
       claimTimer = setTimeout(() => {
+        checkStoredResult();
         if (!sawWorker) finish({ status: 'failed', message: '标签页未在时限内认领任务，可能被浏览器后台限制' });
       }, pickClaimTimeout(timeoutMs));
     } catch (error) {
@@ -1892,7 +2023,9 @@ async function runBatchCheckIn(siteIds = null) {
       const assignedAt = Date.now();
       saveJob({
         site,
+        runId,
         assignedAt,
+        expiresAt: assignedAt + settings.siteTimeoutMs,
         claimBy: pickClaimDeadline(settings.siteTimeoutMs, assignedAt)
       });
       renderPanel();
@@ -1904,6 +2037,8 @@ async function runBatchCheckIn(siteIds = null) {
           insert: true,
           setParent: true
         });
+        // 先登记句柄，等待结果期间也保留本轮打开的标签页记录。
+        rememberOpenedTab(site.siteId, site.siteName, handle);
       } catch (e) {
         const reason = e?.message || String(e || '未知错误');
         collected[site.siteId] = { status: 'failed', message: `打开标签页失败: ${reason}` };
@@ -1913,14 +2048,18 @@ async function runBatchCheckIn(siteIds = null) {
       }
 
       const result = await waitForSiteResult(site.siteId, settings.siteTimeoutMs, runId);
+      if (!ownsRun(runId)) {
+        lostOwnership = getRunState().runId !== runId;
+        if (!lostOwnership) coordinatorAborted = true;
+        break;
+      }
       collected[site.siteId] = result;
+      // 超时等结果来自协调者自身，也要落盘，避免面板永远残留“签到中”。
+      saveResults({ ...getResults(), [site.siteId]: result });
       if (result.aborted || isRunAbortRequested(runId)) coordinatorAborted = true;
 
       // 默认把标签页留着，让你能自己核对签到结果。
-      // 攒下句柄，之后用面板上的「关闭标签页」一次性关掉。
-      if (handle) {
-        rememberOpenedTab(site.siteId, site.siteName, handle);
-      }
+      // 之后可用面板上的「关闭标签页」一次性关掉。
       if (settings.autoCloseTab === true && !shouldKeepTabOpen(result)) {
         closeRememberedTab(site.siteId);
       }
@@ -2272,6 +2411,7 @@ function renderPanel() {
   const sites = getSites();
   const results = getResults();
   const runState = getRunState();
+  const job = getJob();
   const running = runState.running === true && isRunStateFresh(runState);
   const aborting = running && Boolean(runState.abortRequestedAt);
   const enabledCount = sites.filter(s => s.enabled).length;
@@ -2301,6 +2441,16 @@ function renderPanel() {
         ? `<button class="gm-btn" data-act="close-tabs">关闭 ${openedTabCount} 个标签页</button>`
         : ''}
     </div>
+    ${running && !aborting && isCurrentJob(job) ? `
+      <div class="gm-actions">
+        <button class="gm-btn" data-act="manual-complete"
+                data-run-id="${escapeHtml(runState.runId)}" data-site-id="${escapeHtml(runState.currentSiteId)}"
+                title="已在站点页面完成签到，记录为成功并继续">已手动完成</button>
+        <button class="gm-btn" data-act="skip-site"
+                data-run-id="${escapeHtml(runState.runId)}" data-site-id="${escapeHtml(runState.currentSiteId)}"
+                title="保留标签页，记为待确认并继续">跳过当前站点</button>
+      </div>
+    ` : ''}
     <div class="gm-row">
       <input type="text" data-role="new-site" placeholder="签到页地址，如 c.com/#/checkin">
     </div>
@@ -2436,6 +2586,17 @@ function bindPanelEvents(panel, body) {
   });
 
   body.querySelector('[data-act="abort"]')?.addEventListener('click', abortBatchCheckIn);
+
+  for (const [action, status] of [['manual-complete', 'success'], ['skip-site', 'unknown']]) {
+    const button = body.querySelector(`[data-act="${action}"]`);
+    button?.addEventListener('click', () => {
+      const finished = finishCurrentSite(button.dataset.runId, button.dataset.siteId, status);
+      showToast(finished
+        ? (status === 'success' ? '已记录手动完成，继续队列' : '已跳过，继续队列')
+        : '这个任务已结束，面板已刷新');
+      renderPanel();
+    });
+  }
 
   const forceStopBtn = body.querySelector('[data-act="force-stop"]');
   forceStopBtn?.addEventListener('click', () => {
@@ -3120,17 +3281,13 @@ async function main() {
   // 不在列表里的站点：只留菜单入口，不做任何自动动作
   if (!known) return;
 
-  // 认领任务：域名对得上，且任务是刚派出来的。
-  // 时间窗口用来排除你手上其它同域标签页——它们如果稍后发生导航，
-  // 那时任务早已被清掉或超出窗口，不会重复签到。
+  // 首次认领受时间窗口限制；原标签页跳转后凭标签页数据接续尚未结束的任务。
   // 已知站点一律监听聚焦请求：面板上点"切过来"时，
   // 由这个页面自己调 window.focus()，而不是新开一个标签页
   watchFocusRequests(host);
 
-  const job = getJob();
-  if (isJobFresh(job, host)) {
-    // 立刻标记已认领，防止同域的另一个页面也把这个任务执行一遍
-    saveJob({ ...job, claimedAt: Date.now() });
+  const job = await claimWorkerJob(host);
+  if (job) {
     await runWorker(job);
     return;
   }
