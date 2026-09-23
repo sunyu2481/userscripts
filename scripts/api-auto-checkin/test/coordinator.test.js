@@ -4,67 +4,101 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { srcDir } = require('./load-src.js');
 
-function setupCoordinator(initialState = { running: true, runId: 'run-1' }, initialResults = {}) {
+function setupCoordinator(initialState = { running: true, runId: 'run-1' }, initialResults = {}, options = {}) {
   const source = fs.readFileSync(path.join(srcDir, '60-coordinator.js'), 'utf8');
   const listeners = new Map();
+  const timers = new Map();
+  const opened = [];
+  const toasts = [];
   let nextListenerId = 1;
+  let nextTimerId = 1;
   let state = initialState;
   let results = initialResults;
   let job = null;
   let renderCount = 0;
 
-  const factory = new Function(
-    'getRunState', 'saveRunState', 'getResults', 'saveResults', 'clearJob',
-    'renderPanel', 'isRecord', 'GM_addValueChangeListener',
-    'GM_removeValueChangeListener', 'KEY_RESULTS', 'KEY_RUN',
-    'setTimeout', 'clearTimeout', 'Date', 'Math', `
+  function fire(key, value, remote = true) {
+    for (const listener of [...listeners.values()]) {
+      if (listener.key === key) listener.callback(key, null, JSON.stringify(value), remote);
+    }
+  }
+
+  function schedule(callback, delay, repeat = false) {
+    const id = nextTimerId++;
+    timers.set(id, { callback, delay, repeat });
+    return id;
+  }
+
+  const globals = {
+    getRunState: () => state,
+    saveRunState: next => { state = next; fire('run', next, false); },
+    getResults: () => results,
+    saveResults: next => { results = next; fire('results', next, false); },
+    getJob: () => job,
+    saveJob: next => { job = next; },
+    clearJob: () => { job = null; },
+    renderPanel: () => { renderCount++; },
+    isRecord: value => value !== null && typeof value === 'object' && !Array.isArray(value),
+    GM_addValueChangeListener: (key, callback) => {
+      const id = nextListenerId++;
+      listeners.set(id, { key, callback });
+      if (key === 'results' && options.resultOnListen) results = options.resultOnListen;
+      return id;
+    },
+    GM_removeValueChangeListener: id => listeners.delete(id),
+    KEY_RESULTS: 'results',
+    KEY_RUN: 'run',
+    setTimeout: (callback, delay) => schedule(callback, delay),
+    clearTimeout: id => timers.delete(id),
+    setInterval: (callback, delay) => schedule(callback, delay, true),
+    clearInterval: id => timers.delete(id),
+    getSettings: () => ({ gapMinMs: 0, gapMaxMs: 0, siteTimeoutMs: 90000, ...options.settings }),
+    getSites: () => options.sites || [],
+    sleep: async () => {},
+    showToast: message => toasts.push(message),
+    saveLastCheckInTime: () => {},
+    GM_openInTab: url => {
+      const handle = { url, closed: false, close() { handle.closed = true; } };
+      opened.push(handle);
+      return handle;
+    }
+  };
+
+  const factory = new Function(...Object.keys(globals), `
       ${source}
       return {
         waitForSiteResult, isRunStateFresh, isJobFresh, ownsRun,
         pickClaimTimeout, pickClaimDeadline, forceStopRunState, heartbeatRunState,
-        isHeartbeatOnlyChange, saveActiveRunState,
+        isHeartbeatOnlyChange, saveActiveRunState, finishCurrentSite, runBatchCheckIn,
         RUN_STATE_TTL_MS, RUN_HEARTBEAT_MS,
         CLAIM_HEARTBEAT_TIMEOUT_MS, JOB_CLAIM_WINDOW_MS
       };
     `
   );
 
-  const module = factory(
-    () => state,
-    next => { state = next; },
-    () => results,
-    next => { results = next; },
-    () => { job = null; },
-    () => { renderCount++; },
-    value => value !== null && typeof value === 'object' && !Array.isArray(value),
-    (key, callback) => {
-      const id = nextListenerId++;
-      listeners.set(id, { key, callback });
-      return id;
-    },
-    id => listeners.delete(id),
-    'results',
-    'run',
-    setTimeout,
-    clearTimeout,
-    Date,
-    Math
-  );
+  const module = factory(...Object.values(globals));
 
   return {
     module,
     setState(next) { state = next; },
     setResults(next) { results = next; },
+    setJob(next) { job = next; },
     get state() { return state; },
     get results() { return results; },
     get job() { return job; },
     get renderCount() { return renderCount; },
-    fire(key, value, remote = true) {
-      for (const listener of [...listeners.values()]) {
-        if (listener.key === key) listener.callback(key, null, JSON.stringify(value), remote);
+    fire,
+    fireTimers(delay) {
+      for (const [id, timer] of [...timers.entries()]) {
+        if (timer.delay !== delay || !timers.has(id)) continue;
+        if (!timer.repeat) timers.delete(id);
+        timer.callback();
       }
     },
-    get listenerCount() { return listeners.size; }
+    opened,
+    toasts,
+    get listenerCount() { return listeners.size; },
+    get timerCount() { return timers.size; }
   };
 }
 
@@ -79,6 +113,133 @@ test('共享终止请求会立即解除站点结果等待', async () => {
 
   assert.deepEqual(await pending, { status: 'failed', message: '已中断', aborted: true });
   assert.equal(ctx.listenerCount, 0);
+  assert.equal(ctx.timerCount, 0);
+});
+
+test('本地手动结果和远程 worker 结果都立即解除等待', async () => {
+  for (const remote of [false, true]) {
+    const ctx = setupCoordinator();
+    const pending = ctx.module.waitForSiteResult('a_com', 90000, 'run-1');
+    const result = { status: 'success', runId: 'run-1', message: '签到完成' };
+    ctx.fire('results', { a_com: result }, remote);
+    assert.deepEqual(await pending, result);
+    assert.equal(ctx.listenerCount, 0);
+    assert.equal(ctx.timerCount, 0);
+  }
+});
+
+test('旧轮次和其它站点的结果不能结束当前等待', async () => {
+  const ctx = setupCoordinator();
+  const pending = ctx.module.waitForSiteResult('a_com', 90000, 'run-1');
+  ctx.fire('results', { a_com: { status: 'success', runId: 'run-old' } });
+  ctx.fire('results', { b_com: { status: 'success', runId: 'run-1' } });
+  assert.equal(ctx.listenerCount, 2);
+
+  const result = { status: 'already', runId: 'run-1' };
+  ctx.fire('results', { a_com: result });
+  assert.deepEqual(await pending, result);
+});
+
+test('读取与注册监听之间落盘的结果不会漏掉', async () => {
+  const result = { status: 'success', runId: 'run-1' };
+  const ctx = setupCoordinator(undefined, {}, { resultOnListen: { a_com: result } });
+  assert.deepEqual(await ctx.module.waitForSiteResult('a_com', 90000, 'run-1'), result);
+  assert.equal(ctx.listenerCount, 0);
+  assert.equal(ctx.timerCount, 0);
+});
+
+test('漏发变更事件时轮询能读到完成结果', async () => {
+  const ctx = setupCoordinator();
+  const pending = ctx.module.waitForSiteResult('a_com', 90000, 'run-1');
+  const result = { status: 'success', runId: 'run-1' };
+  ctx.setResults({ a_com: result });
+  ctx.fireTimers(1000);
+  assert.deepEqual(await pending, result);
+  assert.equal(ctx.timerCount, 0);
+});
+
+test('后台定时器延迟时先读已落盘结果再判超时', async () => {
+  const ctx = setupCoordinator();
+  const pending = ctx.module.waitForSiteResult('a_com', 90000, 'run-1');
+  const result = { status: 'success', runId: 'run-1' };
+  ctx.setResults({ a_com: result });
+  ctx.fireTimers(90000);
+  assert.deepEqual(await pending, result);
+  assert.equal(ctx.listenerCount, 0);
+});
+
+test('另一轮接管后立即结束旧等待并清理监听', async () => {
+  const ctx = setupCoordinator();
+  const pending = ctx.module.waitForSiteResult('a_com', 90000, 'run-1');
+  ctx.setState({ running: true, runId: 'run-2' });
+  ctx.fire('run', ctx.state);
+  assert.equal((await pending).aborted, true);
+  assert.equal(ctx.listenerCount, 0);
+  assert.equal(ctx.timerCount, 0);
+});
+
+const batchSites = ['a', 'b'].map(name => ({
+  siteId: `${name}_com`, domain: `${name}.com`, siteName: name,
+  visitUrl: `https://${name}.com/checkin`, enabled: true
+}));
+
+test('手动完成后队列开下一站，跳过保留标签页且不算成功', async () => {
+  const ctx = setupCoordinator({ running: false }, {}, {
+    sites: batchSites, settings: { autoCloseTab: true }
+  });
+  const pending = ctx.module.runBatchCheckIn();
+  await new Promise(setImmediate);
+  assert.equal(ctx.opened.length, 1);
+  assert.equal(ctx.job.runId, ctx.state.runId);
+  assert.equal(ctx.job.expiresAt - ctx.job.assignedAt, 90000);
+  const runId = ctx.state.runId;
+
+  assert.equal(ctx.module.finishCurrentSite('run-old', 'a_com', 'success'), false);
+  assert.equal(ctx.module.finishCurrentSite(runId, 'b_com', 'success'), false);
+  assert.equal(ctx.module.finishCurrentSite(runId, 'a_com', 'failed'), false);
+  assert.equal(ctx.module.finishCurrentSite(runId, 'a_com', 'success'), true);
+  assert.equal(ctx.module.finishCurrentSite(runId, 'a_com', 'success'), false, '双击不能重复处理');
+  await new Promise(setImmediate);
+
+  assert.equal(ctx.opened.length, 2, '无需触发超时定时器就应打开下一站');
+  assert.equal(ctx.results.a_com.status, 'success');
+  assert.equal(ctx.results.a_com.manual, true);
+  assert.equal(ctx.opened[0].closed, true);
+  assert.equal(ctx.module.finishCurrentSite(runId, 'a_com', 'unknown'), false, '旧按钮不能跳过下一站');
+  assert.equal(ctx.module.finishCurrentSite(runId, 'b_com', 'unknown'), true);
+  await pending;
+
+  assert.equal(ctx.results.b_com.status, 'unknown');
+  assert.equal(ctx.results.b_com.skipped, true);
+  assert.equal(ctx.opened[1].closed, false);
+  assert.equal(ctx.state.running, false);
+  assert.equal(ctx.job, null);
+  assert.equal(ctx.listenerCount, 0);
+  assert.equal(ctx.timerCount, 0);
+});
+
+test('真实超时会落盘失败结果，不会让面板残留签到中', async () => {
+  const ctx = setupCoordinator({ running: false }, {}, { sites: batchSites.slice(0, 1) });
+  const pending = ctx.module.runBatchCheckIn();
+  await new Promise(setImmediate);
+  ctx.setResults({ a_com: { status: 'checking', runId: ctx.state.runId } });
+  ctx.fireTimers(90000);
+  await pending;
+  assert.equal(ctx.results.a_com.status, 'failed');
+  assert.match(ctx.results.a_com.message, /超时/);
+  assert.equal(ctx.job, null);
+  assert.equal(ctx.timerCount, 0);
+});
+
+test('强制结束当前轮次不会被误报为另一页面接管', async () => {
+  const ctx = setupCoordinator({ running: false }, {}, { sites: batchSites.slice(0, 1) });
+  const pending = ctx.module.runBatchCheckIn();
+  await new Promise(setImmediate);
+  assert.equal(ctx.module.forceStopRunState(ctx.state.runId), true);
+  await pending;
+  assert.equal(ctx.state.aborted, true);
+  assert.equal(ctx.toasts.at(-1), '已终止');
+  assert.equal(ctx.timerCount, 0);
 });
 
 test('运行态只在有效时间窗口内阻止重复启动', () => {

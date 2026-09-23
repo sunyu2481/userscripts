@@ -58,17 +58,13 @@ async function main() {
   // 不在列表里的站点：只留菜单入口，不做任何自动动作
   if (!known) return;
 
-  // 认领任务：域名对得上，且任务是刚派出来的。
-  // 时间窗口用来排除你手上其它同域标签页——它们如果稍后发生导航，
-  // 那时任务早已被清掉或超出窗口，不会重复签到。
+  // 首次认领受时间窗口限制；原标签页跳转后凭标签页数据接续尚未结束的任务。
   // 已知站点一律监听聚焦请求：面板上点"切过来"时，
   // 由这个页面自己调 window.focus()，而不是新开一个标签页
   watchFocusRequests(host);
 
-  const job = getJob();
-  if (isJobFresh(job, host)) {
-    // 立刻标记已认领，防止同域的另一个页面也把这个任务执行一遍
-    saveJob({ ...job, claimedAt: Date.now() });
+  const job = await claimWorkerJob(host);
+  if (job) {
     await runWorker(job);
     return;
   }

@@ -141,7 +141,7 @@ function closeAllOpenedTabs() {
 
 // 需要你亲自处理的标签页不该被自动关掉
 function shouldKeepTabOpen(result) {
-  return result?.needsHuman === true || result?.needsLogin === true;
+  return result?.needsHuman === true || result?.needsLogin === true || result?.skipped === true;
 }
 
 function pickGap(settings = {}) {
@@ -191,6 +191,44 @@ function isJobFresh(job, host, now = Date.now()) {
   return now - assignedAt <= JOB_CLAIM_WINDOW_MS;
 }
 
+function isSameJob(left, right) {
+  return Boolean(left?.runId && left.runId === right?.runId &&
+    left.assignedAt === right.assignedAt && left.site?.siteId &&
+    left.site.siteId === right.site?.siteId);
+}
+
+// 只有当前仍在等待的任务能点击或回写。手动完成后即使旧页面还活着，也要收手。
+function isCurrentJob(job) {
+  const state = getRunState();
+  if (!isSameJob(job, getJob()) || !ownsRun(job.runId, state) ||
+      state.currentSiteId !== job.site.siteId || isRunAbortRequested(job.runId, state)) return false;
+  const result = getResults()[job.site.siteId];
+  return !result || result.status === 'checking';
+}
+
+function finishCurrentSite(runId, siteId, status) {
+  if (status !== 'success' && status !== 'unknown') return false;
+  const job = getJob();
+  // 按钮绑定渲染时的运行和站点，旧面板上的点击不能处理下一站或新一轮。
+  if (!runId || job?.runId !== runId || job.site?.siteId !== siteId || !isCurrentJob(job)) return false;
+  const skipped = status === 'unknown';
+  saveResults({
+    ...getResults(),
+    [siteId]: {
+      status,
+      message: skipped ? '已跳过，未确认签到结果' : '已手动完成签到',
+      manual: true,
+      skipped,
+      siteName: job.site.siteName,
+      runId,
+      assignedAt: job.assignedAt,
+      at: Date.now()
+    }
+  });
+  renderPanel();
+  return true;
+}
+
 // 等某个站点的结果写入，或超时
 function waitForSiteResult(siteId, timeoutMs, runId = null) {
   return new Promise((resolve, reject) => {
@@ -198,6 +236,7 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
     let runListenerId = null;
     let timer = null;
     let claimTimer = null;
+    let pollTimer = null;
     let settled = false;
     let sawWorker = false;
 
@@ -210,8 +249,9 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
         try { GM_removeValueChangeListener(runListenerId); } catch (e) { /* 已移除 */ }
         runListenerId = null;
       }
-      if (timer) clearTimeout(timer);
-      if (claimTimer) clearTimeout(claimTimer);
+      if (timer !== null) clearTimeout(timer);
+      if (claimTimer !== null) clearTimeout(claimTimer);
+      if (pollTimer !== null) clearInterval(pollTimer);
       if (cancelCoordinatorWait === cancel) cancelCoordinatorWait = null;
     }
 
@@ -233,35 +273,40 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
       finish({ status: 'failed', message: '已中断', aborted: true });
     }
 
-    if (runId && isRunAbortRequested(runId)) {
+    function acceptResult(result) {
+      if (!result || (runId && result.runId !== runId)) return;
+      sawWorker = true;
+      if (result.status !== 'checking') finish(result);
+    }
+
+    function checkStoredResult() {
+      if (runId && (!ownsRun(runId) || isRunAbortRequested(runId))) {
+        cancel();
+        return;
+      }
+      acceptResult(getResults()[siteId]);
+    }
+
+    if (runId && (!ownsRun(runId) || isRunAbortRequested(runId))) {
       cancel();
       return;
     }
 
     // 先查一次，避免结果早于监听写入
     const existing = getResults()[siteId];
-    if (existing) {
-      sawWorker = true;
-      if (existing.status !== 'checking') {
-        finish(existing);
-        return;
-      }
-    }
+    acceptResult(existing);
+    if (settled) return;
 
     try {
-      listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue, remote) => {
-        if (!remote) return;
+      listenerId = GM_addValueChangeListener(KEY_RESULTS, (name, oldValue, newValue) => {
         let parsed = null;
         try {
           parsed = typeof newValue === 'string' ? JSON.parse(newValue) : newValue;
         } catch (e) {
           return;
         }
-        const result = parsed?.[siteId];
-        if (result) {
-          sawWorker = true;
-          if (result.status !== 'checking') finish(result);
-        }
+        // 本地的手动完成与远程 worker 的结果都必须能解除等待。
+        acceptResult(parsed?.[siteId]);
       });
 
       if (runId) {
@@ -272,18 +317,22 @@ function waitForSiteResult(siteId, timeoutMs, runId = null) {
           } catch (e) {
             return;
           }
-          if (isRunAbortRequested(runId, state)) cancel();
+          if (!ownsRun(runId, state) || isRunAbortRequested(runId, state)) cancel();
         });
         cancelCoordinatorWait = cancel;
-        if (isRunAbortRequested(runId)) cancel();
       }
 
+      // 补上读取与注册监听之间的窗口；轮询兜住油猴漏发的变更通知。
+      checkStoredResult();
       if (settled) return;
+      pollTimer = setInterval(checkStoredResult, 1000);
       timer = setTimeout(() => {
+        checkStoredResult();
         finish({ status: 'failed', message: '处理超时，站点可能加载太慢' });
       }, timeoutMs);
       // 没等到 worker 写入任何结果（含 checking）就提前放弃，不干等满主超时
       claimTimer = setTimeout(() => {
+        checkStoredResult();
         if (!sawWorker) finish({ status: 'failed', message: '标签页未在时限内认领任务，可能被浏览器后台限制' });
       }, pickClaimTimeout(timeoutMs));
     } catch (error) {
@@ -383,7 +432,9 @@ async function runBatchCheckIn(siteIds = null) {
       const assignedAt = Date.now();
       saveJob({
         site,
+        runId,
         assignedAt,
+        expiresAt: assignedAt + settings.siteTimeoutMs,
         claimBy: pickClaimDeadline(settings.siteTimeoutMs, assignedAt)
       });
       renderPanel();
@@ -395,6 +446,8 @@ async function runBatchCheckIn(siteIds = null) {
           insert: true,
           setParent: true
         });
+        // 先登记句柄，等待结果期间也保留本轮打开的标签页记录。
+        rememberOpenedTab(site.siteId, site.siteName, handle);
       } catch (e) {
         const reason = e?.message || String(e || '未知错误');
         collected[site.siteId] = { status: 'failed', message: `打开标签页失败: ${reason}` };
@@ -404,14 +457,18 @@ async function runBatchCheckIn(siteIds = null) {
       }
 
       const result = await waitForSiteResult(site.siteId, settings.siteTimeoutMs, runId);
+      if (!ownsRun(runId)) {
+        lostOwnership = getRunState().runId !== runId;
+        if (!lostOwnership) coordinatorAborted = true;
+        break;
+      }
       collected[site.siteId] = result;
+      // 超时等结果来自协调者自身，也要落盘，避免面板永远残留“签到中”。
+      saveResults({ ...getResults(), [site.siteId]: result });
       if (result.aborted || isRunAbortRequested(runId)) coordinatorAborted = true;
 
       // 默认把标签页留着，让你能自己核对签到结果。
-      // 攒下句柄，之后用面板上的「关闭标签页」一次性关掉。
-      if (handle) {
-        rememberOpenedTab(site.siteId, site.siteName, handle);
-      }
+      // 之后可用面板上的「关闭标签页」一次性关掉。
       if (settings.autoCloseTab === true && !shouldKeepTabOpen(result)) {
         closeRememberedTab(site.siteId);
       }

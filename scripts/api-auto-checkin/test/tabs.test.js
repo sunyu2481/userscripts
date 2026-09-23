@@ -99,6 +99,7 @@ test('需要用户处理的结果不该自动关', () => {
   const M = loadTabHelpers();
   assert.equal(M.shouldKeepTabOpen({ needsHuman: true }), true);
   assert.equal(M.shouldKeepTabOpen({ needsLogin: true }), true);
+  assert.equal(M.shouldKeepTabOpen({ status: 'unknown', skipped: true }), true);
 });
 
 test('普通结果可以自动关', () => {

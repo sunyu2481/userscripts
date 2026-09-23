@@ -157,3 +157,106 @@ test('元素不支持 scrollIntoView 也能点', () => {
   assert.equal(M.clickElement(button), true);
   assert.equal(button.clicked, 1);
 });
+
+// 用可推进的时钟跑完整签到流程，不必让回归用例真实等待 20 秒。
+function setupCheckIn(spec, onSleep = () => {}) {
+  const dom = buildDom(spec, { url: 'https://a.com/checkin' });
+  let now = 1000000;
+  class TestDate extends Date {
+    static now() { return now; }
+  }
+  const source = ['20-site.js', '30-detect.js', '31-guards.js', '41-verdict.js', '40-checkin.js']
+    .map(name => fs.readFileSync(path.join(srcDir, name), 'utf8')).join('\n');
+  const globals = {
+    document: dom.document, window: dom.window, location: dom.location, URL,
+    Date: TestDate,
+    setTimeout: (callback, ms) => {
+      now += ms;
+      onSleep(ms);
+      queueMicrotask(callback);
+    },
+    getSettings: () => ({ extraButtonWords: '' })
+  };
+  const M = new Function(...Object.keys(globals), `
+    ${source}
+    return { checkInOnThisPage, capture: response => capturedResponses.push(response) };
+  `)(...Object.values(globals));
+  return { ...dom, M, get elapsed() { return now - 1000000; } };
+}
+
+const checkInSite = { visitUrl: 'https://a.com/checkin', buttonWords: [], resultWords: [] };
+
+test('登录返回后已经手动签到时采信明确反馈，不再点击', async () => {
+  const ctx = setupCheckIn([
+    { tag: 'button', text: '签到' },
+    { tag: 'div', attrs: { role: 'alert' }, text: '签到成功' }
+  ]);
+  const result = await ctx.M.checkInOnThisPage(checkInSite, { resumed: true });
+  assert.equal(result.status, 'success');
+  assert.equal(ctx.body.querySelector('button').clicked, 0);
+});
+
+test('跳转接续先读手动签到的响应，不会把它清掉再点击', async () => {
+  const ctx = setupCheckIn([{ tag: 'button', text: '签到' }]);
+  ctx.M.capture({ isCheckInish: true, status: 200, text: JSON.stringify({ success: true, message: '签到成功' }) });
+  const result = await ctx.M.checkInOnThisPage(checkInSite, { resumed: true });
+  assert.equal(result.status, 'success');
+  assert.equal(ctx.body.querySelector('button').clicked, 0);
+});
+
+test('已点击的任务刷新后只读结果，按钮仍可用也不重复点击', async () => {
+  for (const hasFeedback of [true, false]) {
+    const ctx = setupCheckIn([
+      { tag: 'button', text: '签到' },
+      ...(hasFeedback ? [{ tag: 'div', attrs: { role: 'alert' }, text: '签到成功' }] : [])
+    ]);
+    const result = await ctx.M.checkInOnThisPage(checkInSite, {
+      resumed: true,
+      previousClick: { clickedText: '签到', initialAlreadyTexts: [], initialToastTexts: [] }
+    });
+    assert.equal(result.status, hasFeedback ? 'success' : 'unknown');
+    assert.equal(ctx.body.querySelector('button').clicked, 0);
+  }
+});
+
+test('点击后转到登录页会及时报告需要登录', async () => {
+  const ctx = setupCheckIn([{ tag: 'button', text: '签到' }]);
+  const button = ctx.body.querySelector('button');
+  button.click = () => {
+    button.clicked++;
+    button.ownText = '登录';
+    ctx.location.pathname = '/login';
+  };
+  const result = await ctx.M.checkInOnThisPage(checkInSite);
+  assert.equal(result.needsLogin, true);
+  assert.equal(button.clicked, 1);
+  assert.ok(ctx.elapsed < 3000, '不应等完整结果超时');
+});
+
+test('等待渲染期间任务已手动结束就停止，不再点击', async () => {
+  let active = true;
+  const ctx = setupCheckIn([{ tag: 'button', text: '签到' }], () => { active = false; });
+  const result = await ctx.M.checkInOnThisPage(checkInSite, { isActive: () => active });
+  assert.equal(result, null);
+  assert.equal(ctx.body.querySelector('button').clicked, 0);
+});
+
+test('点击前无法继续持有任务时不点击', async () => {
+  const ctx = setupCheckIn([{ tag: 'button', text: '签到' }]);
+  const result = await ctx.M.checkInOnThisPage(checkInSite, { beforeClick: () => false });
+  assert.equal(result, null);
+  assert.equal(ctx.body.querySelector('button').clicked, 0);
+});
+
+test('等待点击结果期间任务被手动结束，不再采信迟到的成功提示', async () => {
+  let active = true;
+  const ctx = setupCheckIn([
+    { tag: 'button', text: '签到' },
+    { tag: 'div', attrs: { role: 'alert' }, text: '签到成功' }
+  ], () => { active = false; });
+  const result = await ctx.M.checkInOnThisPage(checkInSite, {
+    isActive: () => active,
+    previousClick: { clickedText: '签到' }
+  });
+  assert.equal(result, null);
+});

@@ -36,6 +36,17 @@ function bindPanelEvents(panel, body) {
 
   body.querySelector('[data-act="abort"]')?.addEventListener('click', abortBatchCheckIn);
 
+  for (const [action, status] of [['manual-complete', 'success'], ['skip-site', 'unknown']]) {
+    const button = body.querySelector(`[data-act="${action}"]`);
+    button?.addEventListener('click', () => {
+      const finished = finishCurrentSite(button.dataset.runId, button.dataset.siteId, status);
+      showToast(finished
+        ? (status === 'success' ? '已记录手动完成，继续队列' : '已跳过，继续队列')
+        : '这个任务已结束，面板已刷新');
+      renderPanel();
+    });
+  }
+
   const forceStopBtn = body.querySelector('[data-act="force-stop"]');
   forceStopBtn?.addEventListener('click', () => {
     // 只清渲染这个按钮时看到的那一轮，别误杀期间新起的运行态

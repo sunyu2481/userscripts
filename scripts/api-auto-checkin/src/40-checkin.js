@@ -68,15 +68,24 @@ function takeCapturedResult(site) {
 }
 
 // 在页面上执行一次签到
-async function checkInOnThisPage(site) {
+async function checkInOnThisPage(site, options = {}) {
+  const isActive = options.isActive || (() => true);
   await waitForDomReady();
+  if (!isActive()) return null;
+
+  // 已点过按钮的任务在跳转后只读结果，不能再点一次（例如转盘会消耗次数）。
+  if (options.previousClick) {
+    return waitForCheckInOutcome(options.previousClick.clickedText, site, options.previousClick, isActive);
+  }
 
   // hash 路由的 SPA 有时会忽略初始 hash 直接落在首页，
   // 或者被登录流程重定向后丢掉 hash。这里纠正一次。
   await ensureHashRoute(site);
+  if (!isActive()) return null;
 
   // 给 SPA 一点渲染时间
   await sleep(1200);
+  if (!isActive()) return null;
 
   if (looksLikeInvalidPage()) {
     return { status: 'invalid', message: '页面不存在或站点已失效' };
@@ -105,8 +114,15 @@ async function checkInOnThisPage(site) {
   let hashFixes = 0;
 
   while (Date.now() < deadline) {
+    if (!isActive()) return null;
     if (hasHumanVerification()) {
       return { status: 'failed', message: '站点要求人机验证，请手动完成', needsHuman: true };
+    }
+
+    if (options.resumed) {
+      // 你可能已在登录返回后手动签完，先读明确反馈再决定是否点击。
+      const result = takeCapturedResult(site) || readVerdictFromToast(site);
+      if (result) return result;
     }
 
     button = findCheckInButton(site.buttonWords);
@@ -145,6 +161,7 @@ async function checkInOnThisPage(site) {
     await sleep(POLL_MS);
   }
 
+  if (!isActive()) return null;
   if (!button) {
     // 最后再确认一次是否其实已经签过
     const already = findInitialAlreadyCheckedIn(site.buttonWords);
@@ -176,15 +193,14 @@ async function checkInOnThisPage(site) {
   const clickedText = button.text;
   const initialAlreadyTexts = listAlreadyCheckedInTexts();
   const initialToastTexts = listVisibleToastTexts();
+  const baseline = { initialAlreadyTexts, initialToastTexts };
+  if (!isActive() || options.beforeClick?.({ clickedText, ...baseline }) === false) return null;
   const clicked = clickElement(button.el);
   if (!clicked) {
     return { status: 'failed', message: `点击「${clickedText}」失败` };
   }
 
-  return waitForCheckInOutcome(clickedText, site, {
-    initialAlreadyTexts,
-    initialToastTexts
-  });
+  return waitForCheckInOutcome(clickedText, site, baseline, isActive);
 }
 
 // 真实点击：先滚动到可见位置，再派发完整的鼠标事件序列。
@@ -229,11 +245,14 @@ function dispatchQuietly(el, ctorName, type, init) {
 }
 
 // 点完之后看页面怎么反应
-async function waitForCheckInOutcome(clickedText, site = null, baseline = {}) {
+async function waitForCheckInOutcome(clickedText, site = null, baseline = {}, isActive = () => true) {
   const deadline = Date.now() + WAIT_RESULT_TIMEOUT_MS;
+  let sawLoginHint = false;
 
   while (Date.now() < deadline) {
+    if (!isActive()) return null;
     await sleep(POLL_MS);
+    if (!isActive()) return null;
 
     // 页面自己发的请求最可信
     const fromResponse = takeCapturedResult(site);
@@ -260,6 +279,15 @@ async function waitForCheckInOutcome(clickedText, site = null, baseline = {}) {
         needsHuman: true,
         clickedText
       };
+    }
+
+    if (looksLoggedOut()) {
+      if (sawLoginHint) {
+        return { status: 'failed', message: '需要先登录这个站点', needsLogin: true, clickedText };
+      }
+      sawLoginHint = true;
+    } else {
+      sawLoginHint = false;
     }
   }
 

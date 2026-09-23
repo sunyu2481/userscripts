@@ -80,6 +80,7 @@ function renderPanel() {
   const sites = getSites();
   const results = getResults();
   const runState = getRunState();
+  const job = getJob();
   const running = runState.running === true && isRunStateFresh(runState);
   const aborting = running && Boolean(runState.abortRequestedAt);
   const enabledCount = sites.filter(s => s.enabled).length;
@@ -109,6 +110,16 @@ function renderPanel() {
         ? `<button class="gm-btn" data-act="close-tabs">关闭 ${openedTabCount} 个标签页</button>`
         : ''}
     </div>
+    ${running && !aborting && isCurrentJob(job) ? `
+      <div class="gm-actions">
+        <button class="gm-btn" data-act="manual-complete"
+                data-run-id="${escapeHtml(runState.runId)}" data-site-id="${escapeHtml(runState.currentSiteId)}"
+                title="已在站点页面完成签到，记录为成功并继续">已手动完成</button>
+        <button class="gm-btn" data-act="skip-site"
+                data-run-id="${escapeHtml(runState.runId)}" data-site-id="${escapeHtml(runState.currentSiteId)}"
+                title="保留标签页，记为待确认并继续">跳过当前站点</button>
+      </div>
+    ` : ''}
     <div class="gm-row">
       <input type="text" data-role="new-site" placeholder="签到页地址，如 c.com/#/checkin">
     </div>

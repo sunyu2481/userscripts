@@ -66,6 +66,7 @@ test('唯一的 fetch 引用是为了 hook 页面请求', () => {
 test('元数据只申请必要权限，不含网络权限', () => {
   const header = readSrc('00-header.js');
   for (const grant of ['GM_setValue', 'GM_getValue', 'GM_openInTab',
+                       'GM_getTab', 'GM_saveTab',
                        'GM_registerMenuCommand', 'GM_addValueChangeListener',
                        'GM_removeValueChangeListener']) {
     assert.match(header, new RegExp(`@grant\\s+${grant}`), `缺少 @grant ${grant}`);
@@ -213,15 +214,20 @@ test('打开站点时不改动目标地址', () => {
   }
 });
 
-test('任务认领靠时间窗口且只认领一次', () => {
+test('首次认领靠时间窗口，跳转接续限于原标签页和当前任务', () => {
   const coordinator = readSrc('60-coordinator.js');
   const main = readSrc('90-main.js');
+  const worker = readSrc('50-worker.js');
   assert.match(coordinator, /function isJobFresh/);
   assert.match(coordinator, /JOB_CLAIM_WINDOW_MS/);
   assert.match(coordinator, /if \(job\.claimedAt\) return false/);
-  assert.match(main, /isJobFresh\(job, host\)/);
+  assert.match(main, /await claimWorkerJob\(host\)/);
+  assert.match(worker, /isJobFresh\(job, host\)/);
   // 认领后立刻打标记，避免同域两个页面同时执行
-  assert.match(main, /saveJob\(\{ \.\.\.job, claimedAt: Date\.now\(\) \}\)/);
+  assert.match(worker, /claimedAt: Date\.now\(\)/);
+  assert.match(worker, /isSameJob\(job, tab\?\.checkInJob\)/);
+  assert.match(worker, /isWorkerJobActive\(job\)/);
+  assert.match(coordinator, /expiresAt: assignedAt \+ settings\.siteTimeoutMs/);
 
   // 派发时必须写入 claimBy，窗口跟着用户配置的站点超时走。
   // 漏写就退回固定 40s：超时设 5s 的人会在之后几十秒里
@@ -245,13 +251,15 @@ test('hash 路由页面会被纠正到目标路由', () => {
   assert.match(checkin, /hashFixes < 2/);
 });
 
-test('协调者监听结果时区分本地与远程写入', () => {
+test('协调者接收本地和远程结果，并检查本轮身份与监听间隙', () => {
   const coordinator = readSrc('60-coordinator.js');
-  assert.match(coordinator, /if \(!remote\) return/);
+  assert.doesNotMatch(coordinator, /if \(!remote\) return/);
+  assert.match(coordinator, /result\.runId !== runId/);
   const preCheck = coordinator.indexOf('const existing = getResults()');
   const listener = coordinator.indexOf('listenerId = GM_addValueChangeListener');
   assert.ok(preCheck !== -1 && preCheck < listener, '必须先查已有结果再装监听');
   assert.match(coordinator, /GM_removeValueChangeListener/);
+  assert.match(coordinator, /setInterval\(checkStoredResult, 1000\)/);
 });
 
 test('批量开始时清空余额，单站点重试只清自己', () => {
@@ -340,7 +348,7 @@ test('切到标签页是请它自己聚焦，不是新开一个', () => {
 test('站点页面一律监听聚焦请求', () => {
   const main = readSrc('90-main.js');
   const watchIndex = main.indexOf('watchFocusRequests(host)');
-  const jobIndex = main.indexOf('const job = getJob()');
+  const jobIndex = main.indexOf('await claimWorkerJob(host)');
   assert.ok(watchIndex !== -1, '缺少聚焦监听');
   // 必须在派活判断之前装：没被派活的页面也要能被切过来
   assert.ok(watchIndex < jobIndex, '监听要在认领任务之前装');
